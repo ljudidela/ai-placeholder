@@ -1,4 +1,3 @@
-// api/trello-webhook.js
 import { Octokit } from "@octokit/rest";
 
 const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
@@ -6,7 +5,21 @@ const ORG = "ljudidela";
 const GITHUB_BASE = `https://github.com/${ORG}`;
 
 export default async function handler(req, res) {
-  // ←←← ЭТО САМОЕ ГЛАВНОЕ: Trello проверяет именно HEAD!
+  console.log("Webhook прилетел, тело:", JSON.stringify(req.body, null, 2));
+  console.log("Тип действия:", req.body.action?.type);
+  console.log("Модель:", req.body.model?.name);
+
+  if (req.body.action?.type !== "createCard") {
+    console.log("Не createCard → игнорим");
+    return res.status(200).end();
+  }
+
+  const cardName = req.body.action?.data?.card?.name;
+  const cardDesc = req.body.action?.data?.card?.desc || "без описания";
+  const cardId = req.body.action?.data?.card?.id;
+
+  console.log("НОВАЯ КАРТОЧКА!", { cardName, cardDesc, cardId });
+
   if (req.method === "HEAD" || req.method === "GET") {
     return res.status(200).send("Trello webhook alive → AI → GitHub");
   }
@@ -21,7 +34,6 @@ export default async function handler(req, res) {
       return res.status(200).json({ message: "Не createCard — игнор" });
     }
 
-    // остальной код без изменений (Perplexity → GitHub → комментарий)
     const card = action.data.card;
     const cardName = card.name.trim();
     const cardDesc = (card.desc || "Без описания").trim();
