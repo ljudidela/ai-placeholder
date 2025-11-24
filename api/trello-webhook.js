@@ -42,7 +42,7 @@ ${cardDesc}`;
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "llama-3.1-sonar-large-128k-online",
+        model: "sonar",
         messages: [{ role: "user", content: prompt }],
         max_tokens: 4000,
         temperature: 0.6,
