@@ -1,5 +1,6 @@
 // api/trello-webhook.js   (или pages/api/trello-webhook.js)
 import { Octokit } from "@octokit/rest";
+import fetch from "node-fetch";
 
 const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
 
