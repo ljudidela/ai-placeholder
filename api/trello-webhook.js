@@ -375,6 +375,8 @@ ${cardDesc}`;
             try {
               const parsed = JSON.parse(objStr);
               if (parsed.path && parsed.action) {
+                // JSON.parse уже правильно декодировал все экранированные символы
+                // content уже в правильном виде, не трогаем его
                 extracted.push(parsed);
                 console.log(
                   `✓ Извлечён объект: ${parsed.path} (${parsed.action})`
@@ -383,24 +385,41 @@ ${cardDesc}`;
             } catch (e) {
               // этот объект невалиден, пробуем regex
               try {
-                const pathMatch = objStr.match(/"path"\s*:\s*"([^"]+)"/);
-                const actionMatch = objStr.match(/"action"\s*:\s*"([^"]+)"/);
+                // используем более умный regex, который правильно обрабатывает экранированные символы
+                const pathMatch = objStr.match(
+                  /"path"\s*:\s*"((?:[^"\\]|\\.)*)"/
+                );
+                const actionMatch = objStr.match(
+                  /"action"\s*:\s*"((?:[^"\\]|\\.)*)"/
+                );
+                // для content нужно захватить всё до закрывающей кавычки, учитывая экранирование
                 const contentMatch = objStr.match(
-                  /"content"\s*:\s*"((?:[^"\\]|\\.|\\n|\\t|\\r)*)"/
+                  /"content"\s*:\s*"((?:[^"\\]|\\.)*)"/
                 );
 
                 if (pathMatch && actionMatch) {
-                  const path = pathMatch[1];
-                  const action = actionMatch[1];
+                  const path = pathMatch[1].replace(/\\(.)/g, "$1"); // декодируем экранированные символы
+                  const action = actionMatch[1].replace(/\\(.)/g, "$1");
                   let content = contentMatch ? contentMatch[1] : "";
 
-                  // декодируем экранированные символы
-                  content = content
-                    .replace(/\\n/g, "\n")
-                    .replace(/\\t/g, "\t")
-                    .replace(/\\r/g, "\r")
-                    .replace(/\\"/g, '"')
-                    .replace(/\\\\/g, "\\");
+                  // декодируем экранированные символы в content
+                  // заменяем \\n на \n, \\t на \t и т.д.
+                  content = content.replace(/\\(.)/g, (match, char) => {
+                    switch (char) {
+                      case "n":
+                        return "\n";
+                      case "t":
+                        return "\t";
+                      case "r":
+                        return "\r";
+                      case '"':
+                        return '"';
+                      case "\\":
+                        return "\\";
+                      default:
+                        return match; // оставляем как есть, если не знаем
+                    }
+                  });
 
                   extracted.push({ path, action, content });
                   console.log(`✓ Извлечён объект (regex): ${path} (${action})`);
@@ -612,10 +631,29 @@ ${cardDesc}`;
           continue;
         }
 
-        const content =
+        let content =
           typeof op.content === "string"
             ? op.content
             : String(op.content || "");
+
+        // проверяем, нет ли в content буквальных экранированных символов (например, \n как два символа)
+        // это может произойти, если модель вернула неэкранированные символы в JSON
+        // проверяем: есть ли последовательность обратный слеш + символ, но нет реальных переносов
+        const hasEscapedChars = /\\[ntr"\\]/.test(content);
+        const hasRealNewlines = content.includes("\n");
+
+        if (hasEscapedChars && !hasRealNewlines) {
+          // есть буквальные экранированные символы, но нет реальных переносов - декодируем
+          console.log(
+            `⚠ Обнаружены буквальные экранированные символы в ${normalizedPath}, декодируем...`
+          );
+          content = content
+            .replace(/\\n/g, "\n")
+            .replace(/\\t/g, "\t")
+            .replace(/\\r/g, "\r")
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, "\\");
+        }
 
         if (!content && action !== "delete") {
           console.log("Пропускаем файл с пустым содержимым:", normalizedPath);
