@@ -223,9 +223,8 @@ export default async function handler(req, res) {
       : "main";
 
   try {
-    const prompt = `Ты — senior full-stack разработчик.
-У тебя есть Trello-доска с задачами для одного GitHub-репозитория.
-Сейчас нужно сгенерировать/обновить файлы проекта по описанию задачи.
+    const prompt = `Ты — senior разработчик.
+
 ${existingRepoContext}
 
 Важное:
@@ -233,8 +232,6 @@ ${existingRepoContext}
 - Формат строго: [{"path": "путь/к/файлу", "action": "create"|"update"|"delete", "content": "строка с содержимым файла или пустая строка для delete"}, ...]
 - Путь не должен начинаться с слеша. Примеры: "README.md", "package.json", "src/main.tsx".
 - Для action="delete" поле "content" должно быть пустой строкой.
-- Если проект уже существует — анализируй его структуру и вноси изменения точечно, не переписывай всё с нуля.
-- Если проект новый — создай полный каркас (README.md, package.json, базовые конфиги, структуру src/).
 
 Описание задачи:
 ${cardDesc}`;
@@ -252,10 +249,10 @@ ${cardDesc}`;
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "sonar",
+        model: "sonar-pro",
         messages: [{ role: "user", content: prompt }],
-        max_tokens: 8000,
-        temperature: 0.4,
+        max_tokens: 16000,
+        temperature: 0.3,
       }),
     });
 
