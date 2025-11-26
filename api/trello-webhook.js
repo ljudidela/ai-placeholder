@@ -99,6 +99,7 @@ ${cardDesc}`;
       org: ORG,
       name: finalRepoName,
       private: true,
+      auto_init: true,
     });
 
     await octokit.repos.createOrUpdateFileContents({
