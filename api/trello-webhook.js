@@ -56,6 +56,12 @@ export default async function handler(req, res) {
 Описание:
 ${cardDesc}`;
 
+    console.log(
+      "ПЕРПЛЕКСИТИ СТАРТУЕТ, ТОКЕН:",
+      process.env.PERPLEXITY_KEY ? "ЕСТЬ" : "НЕТ"
+    );
+    console.log("ПРОМПТ ОТПРАВЛЯЕМ:", prompt.substring(0, 300) + "...");
+
     const aiRes = await fetch("https://api.perplexity.ai/chat/completions", {
       method: "POST",
       headers: {
