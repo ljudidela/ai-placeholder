@@ -66,17 +66,175 @@ export default async function handler(req, res) {
 
   boardName = boardName.trim() || "ai-board";
 
+  // определяем репозиторий до генерации, чтобы прочитать существующий код
+  let repoName = boardName
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-+/g, "-");
+
+  if (!repoName) repoName = "ai-project";
+
+  const finalRepoName = repoName;
+
+  console.log("BOARD NAME ДЛЯ РЕПО:", boardName);
+  console.log("ЦЕЛЕВОЙ РЕПО ДЛЯ ДОСКИ:", finalRepoName);
+
+  let repoInfo;
+  let existingRepoContext = "";
+
+  try {
+    console.log("Пробуем получить репозиторий:", finalRepoName);
+    repoInfo = await octokit.repos.get({ owner: ORG, repo: finalRepoName });
+    console.log("Репозиторий для доски уже существует:", finalRepoName);
+
+    // читаем существующий репозиторий для контекста
+    const targetBranch =
+      repoInfo?.data?.default_branch &&
+      typeof repoInfo.data.default_branch === "string"
+        ? repoInfo.data.default_branch
+        : "main";
+
+    console.log("Читаем существующий репозиторий для контекста...");
+
+    // получаем список файлов через рекурсивное чтение корня
+    let filesList = [];
+    try {
+      const { data: rootContent } = await octokit.repos.getContent({
+        owner: ORG,
+        repo: finalRepoName,
+        path: "",
+        ref: targetBranch,
+      });
+      if (Array.isArray(rootContent)) {
+        filesList = rootContent.map((item) => item.path);
+      }
+    } catch (e) {
+      console.log("Не удалось получить список файлов:", e.status);
+    }
+
+    // читаем ключевые файлы для контекста
+    const keyFiles = [
+      "README.md",
+      "package.json",
+      "tsconfig.json",
+      "vite.config.ts",
+      "vite.config.js",
+    ];
+    const existingFiles = {};
+
+    // пробуем прочитать ключевые файлы из корня
+    for (const fileName of keyFiles) {
+      try {
+        const { data: fileContent } = await octokit.repos.getContent({
+          owner: ORG,
+          repo: finalRepoName,
+          path: fileName,
+          ref: targetBranch,
+        });
+        if (!Array.isArray(fileContent) && fileContent.content) {
+          const decoded = Buffer.from(fileContent.content, "base64").toString(
+            "utf-8"
+          );
+          existingFiles[fileName] = decoded;
+          console.log(
+            `Прочитан файл для контекста: ${fileName} (${decoded.length} символов)`
+          );
+        }
+      } catch (e) {
+        // файл не найден - это нормально
+      }
+    }
+
+    // формируем контекст существующего проекта
+    if (Object.keys(existingFiles).length > 0 || filesList.length > 0) {
+      existingRepoContext = `\n\nСУЩЕСТВУЮЩИЙ ПРОЕКТ:\n\n`;
+      for (const [path, content] of Object.entries(existingFiles)) {
+        existingRepoContext += `--- Файл: ${path} ---\n${content}\n\n`;
+      }
+      if (filesList.length > 0) {
+        existingRepoContext += `\nСтруктура проекта (найдено файлов/папок: ${filesList.length}):\n`;
+        const paths = filesList.slice(0, 30);
+        existingRepoContext += paths.join("\n");
+        if (filesList.length > 30) {
+          existingRepoContext += `\n... и ещё ${
+            filesList.length - 30
+          } элементов`;
+        }
+      }
+      existingRepoContext += `\n\nВАЖНО: Анализируй существующий код и вноси изменения точечно. Не переписывай всё с нуля, если не требуется полная переработка.`;
+    }
+  } catch (e) {
+    if (e.status === 404) {
+      console.log("Репозиторий не найден (404), будет создан новый");
+      existingRepoContext = "\n\nПРОЕКТ НОВЫЙ (репозиторий будет создан).";
+    } else {
+      console.error("Ошибка при получении репозитория:", e.status, e.message);
+      throw e;
+    }
+  }
+
+  // если репозиторий не существует, создаём его
+  if (!repoInfo) {
+    try {
+      console.log("Создаём новый репозиторий:", finalRepoName);
+      await octokit.repos.createInOrg({
+        org: ORG,
+        name: finalRepoName,
+        private: true,
+        auto_init: true,
+      });
+      console.log("Создан новый репозиторий для доски:", finalRepoName);
+      repoInfo = await octokit.repos.get({
+        owner: ORG,
+        repo: finalRepoName,
+      });
+    } catch (createErr) {
+      const msg = createErr?.message || String(createErr);
+      const status = createErr?.status;
+      console.error(
+        "Ошибка при создании репозитория:",
+        status,
+        msg,
+        createErr?.response?.data || ""
+      );
+
+      if (
+        status === 422 &&
+        typeof msg === "string" &&
+        msg.includes("name already exists")
+      ) {
+        throw new Error(
+          `GitHub: репозиторий "${finalRepoName}" уже существует в организации ${ORG}, ` +
+            `но текущий GITHUB_TOKEN не имеет к нему доступа. ` +
+            `Либо дайте токену доступ к этому репозиторию, либо переименуйте доску/репо.`
+        );
+      }
+
+      throw createErr;
+    }
+  }
+
+  const targetBranch =
+    repoInfo?.data?.default_branch &&
+    typeof repoInfo.data.default_branch === "string"
+      ? repoInfo.data.default_branch
+      : "main";
+
   try {
     const prompt = `Ты — senior full-stack разработчик.
 У тебя есть Trello-доска с задачами для одного GitHub-репозитория.
 Сейчас нужно сгенерировать/обновить файлы проекта по описанию задачи.
+${existingRepoContext}
 
 Важное:
 - Возвращай ТОЛЬКО один JSON-массив без обёрток, без пояснений и без markdown.
 - Формат строго: [{"path": "путь/к/файлу", "action": "create"|"update"|"delete", "content": "строка с содержимым файла или пустая строка для delete"}, ...]
 - Путь не должен начинаться с слеша. Примеры: "README.md", "package.json", "src/main.tsx".
 - Для action="delete" поле "content" должно быть пустой строкой.
-- Обязательно включи хотя бы "README.md" и, если это web-проект, базовый каркас (например, package.json, src/, vite.config.* или аналогичный).
+- Если проект уже существует — анализируй его структуру и вноси изменения точечно, не переписывай всё с нуля.
+- Если проект новый — создай полный каркас (README.md, package.json, базовые конфиги, структуру src/).
 
 Описание задачи:
 ${cardDesc}`;
@@ -112,28 +270,72 @@ ${cardDesc}`;
     );
 
     // иногда модель может вернуть ```json ... ``` — аккуратно вырезаем
-    const jsonMatch = filesJsonRaw.match(/```json([\s\S]*?)```/i);
+    let jsonMatch = filesJsonRaw.match(/```json([\s\S]*?)```/i);
     if (jsonMatch) {
       filesJsonRaw = jsonMatch[1].trim();
+    } else {
+      // может быть просто ``` без json
+      jsonMatch = filesJsonRaw.match(/```([\s\S]*?)```/);
+      if (jsonMatch) {
+        filesJsonRaw = jsonMatch[1].trim();
+      }
+    }
+
+    // пытаемся найти начало JSON-массива
+    const arrayStart = filesJsonRaw.indexOf("[");
+    if (arrayStart > 0) {
+      filesJsonRaw = filesJsonRaw.substring(arrayStart);
+      console.log("Найдено начало массива, обрезано", arrayStart, "символов");
     }
 
     let fileOps;
     try {
       fileOps = JSON.parse(filesJsonRaw);
     } catch (parseErr) {
-      console.error("Не удалось распарсить JSON от Perplexity:", parseErr);
-
-      // fallback: если модель не смогла выдать валидный JSON, работаем по-старому как с одним README
-      console.log(
-        "Fallback: трактуем ответ ИИ как содержимое README.md целиком"
+      console.error(
+        "Не удалось распарсить JSON от Perplexity:",
+        parseErr.message
       );
-      fileOps = [
-        {
-          path: "README.md",
-          action: "update",
-          content: filesJsonRaw,
-        },
-      ];
+
+      // пытаемся восстановить обрезанный JSON
+      // ищем последнюю закрывающую скобку объекта перед местом ошибки
+      const errorPos = parseErr.message.match(/position (\d+)/)?.[1];
+      if (errorPos) {
+        const pos = parseInt(errorPos, 10);
+        let truncated = filesJsonRaw.substring(0, pos);
+
+        // пытаемся найти последний валидный объект
+        const lastObjEnd = truncated.lastIndexOf("}");
+        if (lastObjEnd > 0) {
+          truncated = truncated.substring(0, lastObjEnd + 1);
+          // закрываем массив
+          if (truncated.trim().endsWith("}")) {
+            truncated += "]";
+            try {
+              fileOps = JSON.parse(truncated);
+              console.log(
+                `Восстановлен обрезанный JSON, получено ${fileOps.length} операций`
+              );
+            } catch (e2) {
+              console.log("Не удалось восстановить JSON, используем fallback");
+            }
+          }
+        }
+      }
+
+      // если всё ещё не получилось — fallback
+      if (!fileOps) {
+        console.log(
+          "Fallback: трактуем ответ ИИ как содержимое README.md целиком"
+        );
+        fileOps = [
+          {
+            path: "README.md",
+            action: "update",
+            content: filesJsonRaw,
+          },
+        ];
+      }
     }
 
     if (!Array.isArray(fileOps)) {
@@ -145,84 +347,6 @@ ${cardDesc}`;
       fileOps.length,
       fileOps.slice(0, 5).map((f) => f.path)
     );
-
-    console.log("BOARD NAME ДЛЯ РЕПО:", boardName);
-    let repoName = boardName
-      .toLowerCase()
-      .trim()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .replace(/-+/g, "-");
-
-    if (!repoName) repoName = "ai-project";
-
-    const finalRepoName = repoName;
-
-    console.log("ЦЕЛЕВОЙ РЕПО ДЛЯ ДОСКИ:", finalRepoName);
-
-    let repoInfo;
-    try {
-      console.log("Пробуем получить репозиторий:", finalRepoName);
-      repoInfo = await octokit.repos.get({ owner: ORG, repo: finalRepoName });
-      console.log("Репозиторий для доски уже существует:", finalRepoName);
-    } catch (e) {
-      if (e.status === 404) {
-        console.log(
-          "Репозиторий не найден (404), пробуем создать:",
-          finalRepoName
-        );
-        try {
-          await octokit.repos.createInOrg({
-            org: ORG,
-            name: finalRepoName,
-            private: true,
-            auto_init: true,
-          });
-          console.log("Создан новый репозиторий для доски:", finalRepoName);
-          repoInfo = await octokit.repos.get({
-            owner: ORG,
-            repo: finalRepoName,
-          });
-        } catch (createErr) {
-          const msg = createErr?.message || String(createErr);
-          const status = createErr?.status;
-          console.error(
-            "Ошибка при создании репозитория:",
-            status,
-            msg,
-            createErr?.response?.data || ""
-          );
-
-          if (
-            status === 422 &&
-            typeof msg === "string" &&
-            msg.includes("name already exists")
-          ) {
-            throw new Error(
-              `GitHub: репозиторий "${finalRepoName}" уже существует в организации ${ORG}, ` +
-                `но текущий GITHUB_TOKEN не имеет к нему доступа. ` +
-                `Либо дайте токену доступ к этому репозиторию, либо переименуйте доску/репо.`
-            );
-          }
-
-          throw createErr;
-        }
-      } else {
-        console.error(
-          "Ошибка при получении репозитория:",
-          e.status,
-          e.message,
-          e?.response?.data || ""
-        );
-        throw e;
-      }
-    }
-
-    const targetBranch =
-      repoInfo?.data?.default_branch &&
-      typeof repoInfo.data.default_branch === "string"
-        ? repoInfo.data.default_branch
-        : "main";
 
     console.log(
       "Готовимся применять файл-операции в репо:",
