@@ -121,6 +121,7 @@ ${cardDesc}`;
     );
 
     // репозиторий привязан к ДОСКЕ, а не к конкретной карточке
+    console.log("BOARD NAME ДЛЯ РЕПО:", boardName);
     let repoName = boardName
       .toLowerCase()
       .trim()
@@ -132,31 +133,65 @@ ${cardDesc}`;
 
     const finalRepoName = repoName;
 
+    console.log("ЦЕЛЕВОЙ РЕПО ДЛЯ ДОСКИ:", finalRepoName);
+
     // одна доска — один репозиторий:
     // если репо уже есть, используем его; если нет — создаём
     try {
+      console.log("Пробуем получить репозиторий:", finalRepoName);
       await octokit.repos.get({ owner: ORG, repo: finalRepoName });
       console.log("Репозиторий для доски уже существует:", finalRepoName);
     } catch (e) {
       if (e.status === 404) {
-        await octokit.repos.createInOrg({
-          org: ORG,
-          name: finalRepoName,
-          private: true,
-          auto_init: true,
-        });
-        console.log("Создан новый репозиторий для доски:", finalRepoName);
+        console.log(
+          "Репозиторий не найден (404), пробуем создать:",
+          finalRepoName
+        );
+        try {
+          await octokit.repos.createInOrg({
+            org: ORG,
+            name: finalRepoName,
+            private: true,
+            auto_init: true,
+          });
+          console.log("Создан новый репозиторий для доски:", finalRepoName);
+        } catch (createErr) {
+          const msg = createErr?.message || String(createErr);
+          const status = createErr?.status;
+          console.error(
+            "Ошибка при создании репозитория:",
+            status,
+            msg,
+            createErr?.response?.data || ""
+          );
+
+          // если репозиторий уже существует по имени — считаем, что он наш и работаем дальше
+          if (
+            status === 422 &&
+            typeof msg === "string" &&
+            msg.includes("name already exists")
+          ) {
+            console.log(
+              "GitHub говорит, что репозиторий уже существует, продолжаем работать с ним:",
+              finalRepoName
+            );
+          } else {
+            throw createErr;
+          }
+        }
       } else {
         console.error(
-          "Ошибка при получении/создании репозитория:",
+          "Ошибка при получении репозитория:",
           e.status,
-          e.message
+          e.message,
+          e?.response?.data || ""
         );
         throw e;
       }
     }
 
     // безопасно обновляем README: если он уже есть — передаём sha, если нет — создаём
+    console.log("Готовимся обновлять README.md в репо:", finalRepoName);
     let existingReadmeSha;
     try {
       const { data: existing } = await octokit.repos.getContent({
@@ -166,7 +201,10 @@ ${cardDesc}`;
       });
       if (!Array.isArray(existing)) {
         existingReadmeSha = existing.sha;
-        console.log("README.md уже существует, будет обновлён");
+        console.log(
+          "README.md уже существует, будет обновлён, sha:",
+          existingReadmeSha
+        );
       }
     } catch (e) {
       if (e.status === 404) {
@@ -176,6 +214,13 @@ ${cardDesc}`;
         throw e;
       }
     }
+
+    console.log(
+      "Отправляем README.md в GitHub, длина контента:",
+      readmeContent.length,
+      "символов, sha:",
+      existingReadmeSha || "нет (создание файла)"
+    );
 
     await octokit.repos.createOrUpdateFileContents({
       owner: ORG,
