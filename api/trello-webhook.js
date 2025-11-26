@@ -36,18 +36,14 @@ export default async function handler(req, res) {
 
   if (!cardName || !cardId) return res.status(400).end();
 
-  // если описания нет — ничего не делаем
   if (!cardDescRaw) {
     return res.status(200).end();
   }
 
   const cardDesc = cardDescRaw;
 
-  const boardName = (
-    payload.action?.data?.board?.name ||
-    payload.model?.name ||
-    "ai-board"
-  ).trim();
+  let boardName =
+    payload.action?.data?.board?.name || payload.model?.name || "ai-board";
 
   try {
     if (!boardName) {
@@ -68,17 +64,21 @@ export default async function handler(req, res) {
     console.error("Ошибка при получении доски Trello:", e.message || e);
   }
 
-  // проверка — не создавали ли уже репо
-  const commentsRes = await fetch(
-    `https://api.trello.com/1/cards/${cardId}/actions?filter=commentCard&key=${process.env.TRELLO_KEY}&token=${process.env.TRELLO_TOKEN}`
-  );
-  const comments = await commentsRes.json();
+  boardName = boardName.trim() || "ai-board";
 
   try {
-    const prompt = `Ты — senior full-stack разработчик. Создай полностью рабочий проект по описанию ниже.
-Возвращай ТОЛЬКО содержимое README.md (никаких \`\`\`, объяснений, только текст).
+    const prompt = `Ты — senior full-stack разработчик.
+У тебя есть Trello-доска с задачами для одного GitHub-репозитория.
+Сейчас нужно сгенерировать/обновить файлы проекта по описанию задачи.
 
-Описание:
+Важное:
+- Возвращай ТОЛЬКО один JSON-массив без обёрток, без пояснений и без markdown.
+- Формат строго: [{"path": "путь/к/файлу", "action": "create"|"update"|"delete", "content": "строка с содержимым файла или пустая строка для delete"}, ...]
+- Путь не должен начинаться с слеша. Примеры: "README.md", "package.json", "src/main.tsx".
+- Для action="delete" поле "content" должно быть пустой строкой.
+- Обязательно включи хотя бы "README.md" и, если это web-проект, базовый каркас (например, package.json, src/, vite.config.* или аналогичный).
+
+Описание задачи:
 ${cardDesc}`;
 
     console.log(
@@ -97,21 +97,44 @@ ${cardDesc}`;
         model: "sonar",
         messages: [{ role: "user", content: prompt }],
         max_tokens: 4000,
-        temperature: 0.6,
+        temperature: 0.4,
       }),
     });
 
     if (!aiRes.ok) throw new Error("Perplexity: " + (await aiRes.text()));
     const aiData = await aiRes.json();
-    const readmeContent = aiData.choices[0].message.content.trim();
+    let filesJsonRaw = aiData.choices[0].message.content.trim();
 
-    console.log("ПЕРПЛЕКСИТИ ОТВЕТИЛ:");
+    console.log("ПЕРПЛЕКСИТИ ОТВЕТИЛ (первые 1000 символов):");
     console.log(
-      readmeContent.substring(0, 1000) +
-        (readmeContent.length > 1000 ? "\n... (обрезано)" : "")
+      filesJsonRaw.substring(0, 1000) +
+        (filesJsonRaw.length > 1000 ? "\n... (обрезано)" : "")
     );
 
-    // репозиторий привязан к ДОСКЕ, а не к конкретной карточке
+    // иногда модель может вернуть ```json ... ``` — аккуратно вырезаем
+    const jsonMatch = filesJsonRaw.match(/```json([\s\S]*?)```/i);
+    if (jsonMatch) {
+      filesJsonRaw = jsonMatch[1].trim();
+    }
+
+    let fileOps;
+    try {
+      fileOps = JSON.parse(filesJsonRaw);
+    } catch (parseErr) {
+      console.error("Не удалось распарсить JSON от Perplexity:", parseErr);
+      throw new Error("AI вернул некорректный JSON с файлами");
+    }
+
+    if (!Array.isArray(fileOps)) {
+      throw new Error("AI вернул некорректный формат: ожидался массив файлов");
+    }
+
+    console.log(
+      "Получено операций с файлами от AI:",
+      fileOps.length,
+      fileOps.slice(0, 5).map((f) => f.path)
+    );
+
     console.log("BOARD NAME ДЛЯ РЕПО:", boardName);
     let repoName = boardName
       .toLowerCase()
@@ -126,8 +149,6 @@ ${cardDesc}`;
 
     console.log("ЦЕЛЕВОЙ РЕПО ДЛЯ ДОСКИ:", finalRepoName);
 
-    // одна доска — один репозиторий:
-    // если репо уже есть, используем его; если нет — создаём
     let repoInfo;
     try {
       console.log("Пробуем получить репозиторий:", finalRepoName);
@@ -147,7 +168,6 @@ ${cardDesc}`;
             auto_init: true,
           });
           console.log("Создан новый репозиторий для доски:", finalRepoName);
-          // сразу же читаем репо, чтобы узнать default_branch
           repoInfo = await octokit.repos.get({
             owner: ORG,
             repo: finalRepoName,
@@ -162,8 +182,6 @@ ${cardDesc}`;
             createErr?.response?.data || ""
           );
 
-          // если репозиторий уже существует по имени, но мы не можем его получить/создать —
-          // это почти наверняка проблема прав токена или «чужого» репозитория
           if (
             status === 422 &&
             typeof msg === "string" &&
@@ -196,53 +214,90 @@ ${cardDesc}`;
         : "main";
 
     console.log(
-      "Готовимся обновлять README.md в репо:",
+      "Готовимся применять файл-операции в репо:",
       finalRepoName,
       "ветка:",
       targetBranch
     );
 
-    // безопасно обновляем README: если он уже есть — передаём sha, если нет — создаём
-    let existingReadmeSha;
-    try {
-      const { data: existing } = await octokit.repos.getContent({
+    // применяем изменения для каждого файла
+    for (const op of fileOps) {
+      if (!op || typeof op.path !== "string" || !op.action) continue;
+
+      const action = op.action.toLowerCase();
+      const normalizedPath = op.path.replace(/^\/+/, "");
+
+      if (!["create", "update", "delete"].includes(action)) {
+        console.log("Пропускаем неизвестное действие:", action, normalizedPath);
+        continue;
+      }
+
+      console.log(`Обрабатываем файл: ${normalizedPath}, action: ${action}`);
+
+      // сначала пробуем получить текущий файл, чтобы знать sha
+      let existingSha;
+      try {
+        const { data: existing } = await octokit.repos.getContent({
+          owner: ORG,
+          repo: finalRepoName,
+          path: normalizedPath,
+          ref: targetBranch,
+        });
+        if (!Array.isArray(existing)) {
+          existingSha = existing.sha;
+        }
+      } catch (e) {
+        if (e.status !== 404) {
+          console.error(
+            "Ошибка при получении файла перед изменением:",
+            normalizedPath,
+            e.status,
+            e.message
+          );
+          throw e;
+        }
+      }
+
+      if (action === "delete") {
+        if (!existingSha) {
+          console.log(
+            "Файл для удаления не найден, пропускаем:",
+            normalizedPath
+          );
+          continue;
+        }
+        console.log("Удаляем файл:", normalizedPath);
+        await octokit.repos.deleteFile({
+          owner: ORG,
+          repo: finalRepoName,
+          path: normalizedPath,
+          message: `AI delete ${normalizedPath} — ${cardName}`,
+          sha: existingSha,
+          branch: targetBranch,
+        });
+        continue;
+      }
+
+      const content =
+        typeof op.content === "string" ? op.content : String(op.content || "");
+
+      console.log(
+        `Записываем файл: ${normalizedPath}, bytes:`,
+        Buffer.byteLength(content, "utf8"),
+        "sha:",
+        existingSha || "нет"
+      );
+
+      await octokit.repos.createOrUpdateFileContents({
         owner: ORG,
         repo: finalRepoName,
-        path: "README.md",
-        ref: targetBranch,
+        path: normalizedPath,
+        message: `AI ${action} ${normalizedPath} — ${cardName}`,
+        content: Buffer.from(content).toString("base64"),
+        branch: targetBranch,
+        ...(existingSha ? { sha: existingSha } : {}),
       });
-      if (!Array.isArray(existing)) {
-        existingReadmeSha = existing.sha;
-        console.log(
-          "README.md уже существует, будет обновлён, sha:",
-          existingReadmeSha
-        );
-      }
-    } catch (e) {
-      if (e.status === 404) {
-        console.log("README.md ещё нет, будет создан");
-      } else {
-        console.error("Ошибка при получении README.md:", e.status, e.message);
-        throw e;
-      }
     }
-
-    console.log(
-      "Отправляем README.md в GitHub, длина контента:",
-      readmeContent.length,
-      "символов, sha:",
-      existingReadmeSha || "нет (создание файла)"
-    );
-
-    await octokit.repos.createOrUpdateFileContents({
-      owner: ORG,
-      repo: finalRepoName,
-      path: "README.md",
-      message: `AI: ${cardName} — ${new Date().toISOString().split("T")[0]}`,
-      content: Buffer.from(readmeContent).toString("base64"),
-      branch: targetBranch,
-      ...(existingReadmeSha ? { sha: existingReadmeSha } : {}),
-    });
 
     const repoUrl = `${GITHUB_BASE}/${finalRepoName}`;
     const comment = `Репозиторий создан автоматически\n${repoUrl}`;
