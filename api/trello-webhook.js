@@ -80,6 +80,12 @@ ${cardDesc}`;
     const aiData = await aiRes.json();
     const readmeContent = aiData.choices[0].message.content.trim();
 
+    console.log("ПЕРПЛЕКСИТИ ОТВЕТИЛ:");
+    console.log(
+      readmeContent.substring(0, 1000) +
+        (readmeContent.length > 1000 ? "\n... (обрезано)" : "")
+    );
+
     let repoName = cardName
       .toLowerCase()
       .trim()
