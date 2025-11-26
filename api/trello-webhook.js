@@ -227,11 +227,20 @@ export default async function handler(req, res) {
 
 ${existingRepoContext}
 
-Важное:
-- Возвращай ТОЛЬКО один JSON-массив без обёрток, без пояснений и без markdown.
-- Формат строго: [{"path": "путь/к/файлу", "action": "create"|"update"|"delete", "content": "строка с содержимым файла или пустая строка для delete"}, ...]
-- Путь не должен начинаться с слеша. Примеры: "README.md", "package.json", "src/main.tsx".
-- Для action="delete" поле "content" должно быть пустой строкой.
+КРИТИЧЕСКИ ВАЖНО:
+- Возвращай ТОЛЬКО валидный JSON-массив, БЕЗ markdown-обёрток, БЕЗ пояснений.
+- Формат: [{"path": "путь/к/файлу", "action": "create" или "update" или "delete", "content": "содержимое файла"}, ...]
+- В поле "content" ВСЕ специальные символы должны быть правильно экранированы для JSON:
+  * переносы строк: двойной обратный слеш + n
+  * кавычки: двойной обратный слеш + кавычка
+  * обратные слеши: четыре обратных слеша подряд
+  * табы: двойной обратный слеш + t
+- НЕ используй markdown-блоки кода внутри content.
+- Путь без начального слеша. Примеры: "README.md", "package.json", "src/main.tsx".
+- Для action="delete" поле "content" должно быть пустой строкой "".
+
+Пример правильного JSON:
+[{"path": "README.md", "action": "create", "content": "# Title\\\\n\\\\nDescription"}]
 
 Описание задачи:
 ${cardDesc}`;
@@ -297,6 +306,81 @@ ${cardDesc}`;
         `Длина ответа: ${filesJsonRaw.length} символов, последние 200:`,
         filesJsonRaw.substring(Math.max(0, filesJsonRaw.length - 200))
       );
+
+      // стратегия 0: пытаемся извлечь объекты вручную, парся по частям
+      // ищем начало каждого объекта {"path": и пытаемся извлечь его целиком
+      try {
+        const extracted = [];
+        let searchPos = 0;
+
+        while (true) {
+          const objStart = filesJsonRaw.indexOf('{"path"', searchPos);
+          if (objStart === -1) break;
+
+          // ищем конец объекта - закрывающую }
+          let depth = 0;
+          let inString = false;
+          let escapeNext = false;
+          let objEnd = -1;
+
+          for (let i = objStart; i < filesJsonRaw.length; i++) {
+            const char = filesJsonRaw[i];
+
+            if (escapeNext) {
+              escapeNext = false;
+              continue;
+            }
+
+            if (char === "\\") {
+              escapeNext = true;
+              continue;
+            }
+
+            if (char === '"' && !escapeNext) {
+              inString = !inString;
+              continue;
+            }
+
+            if (inString) continue;
+
+            if (char === "{") depth++;
+            if (char === "}") {
+              depth--;
+              if (depth === 0) {
+                objEnd = i;
+                break;
+              }
+            }
+          }
+
+          if (objEnd > objStart) {
+            const objStr = filesJsonRaw.substring(objStart, objEnd + 1);
+            try {
+              const parsed = JSON.parse(objStr);
+              if (parsed.path && parsed.action) {
+                extracted.push(parsed);
+              }
+            } catch (e) {
+              // этот объект невалиден, пропускаем
+            }
+            searchPos = objEnd + 1;
+          } else {
+            break;
+          }
+        }
+
+        if (extracted.length > 0) {
+          fileOps = extracted;
+          console.log(
+            `Извлечено ${extracted.length} объектов через ручной парсинг (стратегия 0)`
+          );
+        }
+      } catch (manualErr) {
+        console.log(
+          "Стратегия 0 (ручной парсинг) не сработала:",
+          manualErr.message
+        );
+      }
 
       // пытаемся восстановить обрезанный JSON
       const errorPos = parseErr.message.match(/position (\d+)/)?.[1];
