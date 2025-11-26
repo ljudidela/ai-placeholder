@@ -137,9 +137,10 @@ ${cardDesc}`;
 
     // одна доска — один репозиторий:
     // если репо уже есть, используем его; если нет — создаём
+    let repoInfo;
     try {
       console.log("Пробуем получить репозиторий:", finalRepoName);
-      await octokit.repos.get({ owner: ORG, repo: finalRepoName });
+      repoInfo = await octokit.repos.get({ owner: ORG, repo: finalRepoName });
       console.log("Репозиторий для доски уже существует:", finalRepoName);
     } catch (e) {
       if (e.status === 404) {
@@ -155,6 +156,11 @@ ${cardDesc}`;
             auto_init: true,
           });
           console.log("Создан новый репозиторий для доски:", finalRepoName);
+          // сразу же читаем репо, чтобы узнать default_branch
+          repoInfo = await octokit.repos.get({
+            owner: ORG,
+            repo: finalRepoName,
+          });
         } catch (createErr) {
           const msg = createErr?.message || String(createErr);
           const status = createErr?.status;
@@ -192,14 +198,27 @@ ${cardDesc}`;
       }
     }
 
+    const targetBranch =
+      repoInfo?.data?.default_branch &&
+      typeof repoInfo.data.default_branch === "string"
+        ? repoInfo.data.default_branch
+        : "main";
+
+    console.log(
+      "Готовимся обновлять README.md в репо:",
+      finalRepoName,
+      "ветка:",
+      targetBranch
+    );
+
     // безопасно обновляем README: если он уже есть — передаём sha, если нет — создаём
-    console.log("Готовимся обновлять README.md в репо:", finalRepoName);
     let existingReadmeSha;
     try {
       const { data: existing } = await octokit.repos.getContent({
         owner: ORG,
         repo: finalRepoName,
         path: "README.md",
+        ref: targetBranch,
       });
       if (!Array.isArray(existing)) {
         existingReadmeSha = existing.sha;
@@ -230,6 +249,7 @@ ${cardDesc}`;
       path: "README.md",
       message: "AI generated project",
       content: Buffer.from(readmeContent).toString("base64"),
+      branch: targetBranch,
       ...(existingReadmeSha ? { sha: existingReadmeSha } : {}),
     });
 
