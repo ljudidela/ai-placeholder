@@ -122,7 +122,18 @@ ${cardDesc}`;
       fileOps = JSON.parse(filesJsonRaw);
     } catch (parseErr) {
       console.error("Не удалось распарсить JSON от Perplexity:", parseErr);
-      throw new Error("AI вернул некорректный JSON с файлами");
+
+      // fallback: если модель не смогла выдать валидный JSON, работаем по-старому как с одним README
+      console.log(
+        "Fallback: трактуем ответ ИИ как содержимое README.md целиком"
+      );
+      fileOps = [
+        {
+          path: "README.md",
+          action: "update",
+          content: filesJsonRaw,
+        },
+      ];
     }
 
     if (!Array.isArray(fileOps)) {
