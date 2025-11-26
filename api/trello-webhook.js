@@ -408,8 +408,13 @@ ${cardDesc}`;
     );
 
     // применяем изменения для каждого файла
+    const results = { success: [], failed: [] };
+
     for (const op of fileOps) {
-      if (!op || typeof op.path !== "string" || !op.action) continue;
+      if (!op || typeof op.path !== "string" || !op.action) {
+        console.log("Пропускаем некорректную операцию:", op);
+        continue;
+      }
 
       const action = op.action.toLowerCase();
       const normalizedPath = op.path.replace(/^\/+/, "");
@@ -419,84 +424,145 @@ ${cardDesc}`;
         continue;
       }
 
-      console.log(`Обрабатываем файл: ${normalizedPath}, action: ${action}`);
-
-      // сначала пробуем получить текущий файл, чтобы знать sha
-      let existingSha;
+      // оборачиваем каждую операцию в try-catch, чтобы ошибка на одном файле не останавливала остальные
       try {
-        const { data: existing } = await octokit.repos.getContent({
-          owner: ORG,
-          repo: finalRepoName,
-          path: normalizedPath,
-          ref: targetBranch,
-        });
-        if (!Array.isArray(existing)) {
-          existingSha = existing.sha;
-        }
-      } catch (e) {
-        if (e.status !== 404) {
-          console.error(
-            "Ошибка при получении файла перед изменением:",
-            normalizedPath,
-            e.status,
-            e.message
-          );
-          throw e;
-        }
-      }
+        console.log(`Обрабатываем файл: ${normalizedPath}, action: ${action}`);
 
-      if (action === "delete") {
-        if (!existingSha) {
-          console.log(
-            "Файл для удаления не найден, пропускаем:",
-            normalizedPath
-          );
+        // сначала пробуем получить текущий файл, чтобы знать sha
+        let existingSha;
+        try {
+          const { data: existing } = await octokit.repos.getContent({
+            owner: ORG,
+            repo: finalRepoName,
+            path: normalizedPath,
+            ref: targetBranch,
+          });
+          if (!Array.isArray(existing)) {
+            existingSha = existing.sha;
+          }
+        } catch (e) {
+          if (e.status !== 404) {
+            console.error(
+              "Ошибка при получении файла перед изменением:",
+              normalizedPath,
+              e.status,
+              e.message
+            );
+            // не бросаем ошибку, просто логируем и продолжаем
+          }
+        }
+
+        if (action === "delete") {
+          if (!existingSha) {
+            console.log(
+              "Файл для удаления не найден, пропускаем:",
+              normalizedPath
+            );
+            results.success.push({
+              path: normalizedPath,
+              action,
+              note: "не найден",
+            });
+            continue;
+          }
+          console.log("Удаляем файл:", normalizedPath);
+          await octokit.repos.deleteFile({
+            owner: ORG,
+            repo: finalRepoName,
+            path: normalizedPath,
+            message: `AI delete ${normalizedPath} — ${cardName}`,
+            sha: existingSha,
+            branch: targetBranch,
+          });
+          results.success.push({ path: normalizedPath, action });
           continue;
         }
-        console.log("Удаляем файл:", normalizedPath);
-        await octokit.repos.deleteFile({
+
+        const content =
+          typeof op.content === "string"
+            ? op.content
+            : String(op.content || "");
+
+        if (!content && action !== "delete") {
+          console.log("Пропускаем файл с пустым содержимым:", normalizedPath);
+          results.success.push({
+            path: normalizedPath,
+            action,
+            note: "пустой контент",
+          });
+          continue;
+        }
+
+        console.log(
+          `Записываем файл: ${normalizedPath}, bytes:`,
+          Buffer.byteLength(content, "utf8"),
+          "sha:",
+          existingSha || "нет"
+        );
+
+        await octokit.repos.createOrUpdateFileContents({
           owner: ORG,
           repo: finalRepoName,
           path: normalizedPath,
-          message: `AI delete ${normalizedPath} — ${cardName}`,
-          sha: existingSha,
+          message: `AI ${action} ${normalizedPath} — ${cardName}`,
+          content: Buffer.from(content).toString("base64"),
           branch: targetBranch,
+          ...(existingSha ? { sha: existingSha } : {}),
         });
-        continue;
+
+        results.success.push({ path: normalizedPath, action });
+        console.log(`✓ Успешно обработан файл: ${normalizedPath}`);
+      } catch (fileErr) {
+        const errorMsg = fileErr?.message || String(fileErr);
+        const errorStatus = fileErr?.status;
+        console.error(
+          `✗ Ошибка при обработке файла ${normalizedPath}:`,
+          errorStatus,
+          errorMsg
+        );
+        results.failed.push({
+          path: normalizedPath,
+          action,
+          error: errorMsg,
+          status: errorStatus,
+        });
+        // не бросаем ошибку дальше, продолжаем обработку остальных файлов
       }
+    }
 
-      const content =
-        typeof op.content === "string" ? op.content : String(op.content || "");
-
+    console.log(
+      `Итоги обработки файлов: успешно ${results.success.length}, ошибок ${results.failed.length}`
+    );
+    if (results.failed.length > 0) {
       console.log(
-        `Записываем файл: ${normalizedPath}, bytes:`,
-        Buffer.byteLength(content, "utf8"),
-        "sha:",
-        existingSha || "нет"
+        "Файлы с ошибками:",
+        results.failed.map((f) => f.path).join(", ")
       );
-
-      await octokit.repos.createOrUpdateFileContents({
-        owner: ORG,
-        repo: finalRepoName,
-        path: normalizedPath,
-        message: `AI ${action} ${normalizedPath} — ${cardName}`,
-        content: Buffer.from(content).toString("base64"),
-        branch: targetBranch,
-        ...(existingSha ? { sha: existingSha } : {}),
-      });
     }
 
     const repoUrl = `${GITHUB_BASE}/${finalRepoName}`;
-    const comment = `Репозиторий создан автоматически\n${repoUrl}`;
+    let comment = `Репозиторий обновлён автоматически\n${repoUrl}\n\n`;
+    comment += `✓ Создано/обновлено файлов: ${results.success.length}`;
+    if (results.failed.length > 0) {
+      comment += `\n✗ Ошибок: ${results.failed.length}`;
+      comment += `\nПроблемные файлы: ${results.failed
+        .map((f) => f.path)
+        .join(", ")}`;
+    }
 
     await fetch(
       `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${
         process.env.TRELLO_KEY
       }&token=${process.env.TRELLO_TOKEN}&text=${encodeURIComponent(comment)}`,
       { method: "POST" }
-    );
+    ).catch(() => {});
 
-    res.status(200).json({ success: true, repo: repoUrl });
+    res.status(200).json({
+      success: true,
+      repo: repoUrl,
+      filesProcessed: results.success.length,
+      filesFailed: results.failed.length,
+    });
   } catch (err) {
     console.error("Ошибка:", err.message);
     const errComment = `Ошибка: ${err.message.slice(0, 500)}`;
