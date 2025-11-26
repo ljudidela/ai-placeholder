@@ -31,10 +31,44 @@ export default async function handler(req, res) {
 
   const card = payload.action.data.card;
   const cardName = card.name?.trim();
-  const cardDesc = (card.desc || "без описания").trim();
+  const cardDescRaw = (card.desc || "").trim();
   const cardId = card.id;
 
   if (!cardName || !cardId) return res.status(400).end();
+
+  // если описания нет — ничего не делаем
+  if (!cardDescRaw) {
+    return res.status(200).end();
+  }
+
+  const cardDesc = cardDescRaw;
+
+  // определяем доску, к которой относится карточка (одна доска — один репозиторий)
+  let boardName =
+    payload.action?.data?.board?.name ||
+    payload.model?.board?.name ||
+    payload.model?.name;
+
+  try {
+    if (!boardName) {
+      const boardRes = await fetch(
+        `https://api.trello.com/1/cards/${cardId}/board?key=${process.env.TRELLO_KEY}&token=${process.env.TRELLO_TOKEN}`
+      );
+      if (boardRes.ok) {
+        const boardData = await boardRes.json();
+        boardName = boardData.name;
+      } else {
+        console.error(
+          "Не удалось получить доску Trello, статус:",
+          boardRes.status
+        );
+      }
+    }
+  } catch (e) {
+    console.error("Ошибка при получении доски Trello:", e.message || e);
+  }
+
+  boardName = boardName?.trim() || "ai-board";
 
   // проверка — не создавали ли уже репо
   const commentsRes = await fetch(
@@ -86,7 +120,8 @@ ${cardDesc}`;
         (readmeContent.length > 1000 ? "\n... (обрезано)" : "")
     );
 
-    let repoName = cardName
+    // репозиторий привязан к ДОСКЕ, а не к конкретной карточке
+    let repoName = boardName
       .toLowerCase()
       .trim()
       .replace(/[^a-z0-9]+/g, "-")
@@ -95,24 +130,26 @@ ${cardDesc}`;
 
     if (!repoName) repoName = "ai-project";
 
-    let finalRepoName = repoName;
-    let counter = 1;
-    while (true) {
-      try {
-        await octokit.repos.get({ owner: ORG, repo: finalRepoName });
-        finalRepoName = `${repoName}-${counter++}`;
-      } catch (e) {
-        if (e.status === 404) break;
+    const finalRepoName = repoName;
+
+    // одна доска — один репозиторий:
+    // если репо уже есть, используем его; если нет — создаём
+    try {
+      await octokit.repos.get({ owner: ORG, repo: finalRepoName });
+      console.log("Репозиторий для доски уже существует:", finalRepoName);
+    } catch (e) {
+      if (e.status === 404) {
+        await octokit.repos.createInOrg({
+          org: ORG,
+          name: finalRepoName,
+          private: true,
+          auto_init: true,
+        });
+        console.log("Создан новый репозиторий для доски:", finalRepoName);
+      } else {
         throw e;
       }
     }
-
-    await octokit.repos.createInOrg({
-      org: ORG,
-      name: finalRepoName,
-      private: true,
-      auto_init: true,
-    });
 
     await octokit.repos.createOrUpdateFileContents({
       owner: ORG,
