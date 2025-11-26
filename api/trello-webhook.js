@@ -68,8 +68,6 @@ export default async function handler(req, res) {
     console.error("Ошибка при получении доски Trello:", e.message || e);
   }
 
-  boardName = boardName?.trim() || "ai-board";
-
   // проверка — не создавали ли уже репо
   const commentsRes = await fetch(
     `https://api.trello.com/1/cards/${cardId}/actions?filter=commentCard&key=${process.env.TRELLO_KEY}&token=${process.env.TRELLO_TOKEN}`
