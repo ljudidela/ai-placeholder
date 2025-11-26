@@ -314,7 +314,24 @@ ${cardDesc}`;
         let searchPos = 0;
 
         while (true) {
-          const objStart = filesJsonRaw.indexOf('{"path"', searchPos);
+          // ищем начало объекта разными способами
+          let objStart = filesJsonRaw.indexOf('{"path"', searchPos);
+          if (objStart === -1)
+            objStart = filesJsonRaw.indexOf('{ "path"', searchPos);
+          if (objStart === -1)
+            objStart = filesJsonRaw.indexOf('{\n  "path"', searchPos);
+          if (objStart === -1) {
+            // пробуем найти просто "path" и идти назад до {
+            const pathPos = filesJsonRaw.indexOf('"path"', searchPos);
+            if (pathPos !== -1) {
+              for (let i = pathPos; i >= 0 && i >= pathPos - 50; i--) {
+                if (filesJsonRaw[i] === "{") {
+                  objStart = i;
+                  break;
+                }
+              }
+            }
+          }
           if (objStart === -1) break;
 
           // ищем конец объекта - закрывающую }
@@ -359,9 +376,38 @@ ${cardDesc}`;
               const parsed = JSON.parse(objStr);
               if (parsed.path && parsed.action) {
                 extracted.push(parsed);
+                console.log(
+                  `✓ Извлечён объект: ${parsed.path} (${parsed.action})`
+                );
               }
             } catch (e) {
-              // этот объект невалиден, пропускаем
+              // этот объект невалиден, пробуем regex
+              try {
+                const pathMatch = objStr.match(/"path"\s*:\s*"([^"]+)"/);
+                const actionMatch = objStr.match(/"action"\s*:\s*"([^"]+)"/);
+                const contentMatch = objStr.match(
+                  /"content"\s*:\s*"((?:[^"\\]|\\.|\\n|\\t|\\r)*)"/
+                );
+
+                if (pathMatch && actionMatch) {
+                  const path = pathMatch[1];
+                  const action = actionMatch[1];
+                  let content = contentMatch ? contentMatch[1] : "";
+
+                  // декодируем экранированные символы
+                  content = content
+                    .replace(/\\n/g, "\n")
+                    .replace(/\\t/g, "\t")
+                    .replace(/\\r/g, "\r")
+                    .replace(/\\"/g, '"')
+                    .replace(/\\\\/g, "\\");
+
+                  extracted.push({ path, action, content });
+                  console.log(`✓ Извлечён объект (regex): ${path} (${action})`);
+                }
+              } catch (regexErr) {
+                // пропускаем этот объект
+              }
             }
             searchPos = objEnd + 1;
           } else {
@@ -459,18 +505,22 @@ ${cardDesc}`;
         }
       }
 
-      // если всё ещё не получилось — fallback
+      // если всё ещё не получилось — НЕ делаем fallback на README
+      // лучше вернуть ошибку, чем записать весь ответ в README
       if (!fileOps) {
-        console.log(
-          "Fallback: трактуем ответ ИИ как содержимое README.md целиком"
+        console.error(
+          "КРИТИЧЕСКАЯ ОШИБКА: Не удалось извлечь ни одного файла из ответа ИИ"
         );
-        fileOps = [
-          {
-            path: "README.md",
-            action: "update",
-            content: filesJsonRaw,
-          },
-        ];
+        console.error(
+          "Первые 500 символов ответа:",
+          filesJsonRaw.substring(0, 500)
+        );
+        throw new Error(
+          "AI вернул невалидный JSON, и не удалось извлечь файлы. " +
+            "Проверь промпт и формат ответа. Длина ответа: " +
+            filesJsonRaw.length +
+            " символов"
+        );
       }
     }
 
