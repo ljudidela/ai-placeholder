@@ -74,26 +74,43 @@ ${cardDesc}`;
     const aiData = await aiRes.json();
     const readmeContent = aiData.choices[0].message.content.trim();
 
-    const repoName = cardName
+    let repoName = cardName
       .toLowerCase()
-      .replace(/[^a-z0-9-]+/g, "-")
-      .replace(/^-+|-+$/g, "");
+      .trim()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .replace(/-+/g, "-");
+
+    if (!repoName) repoName = "ai-project";
+
+    let finalRepoName = repoName;
+    let counter = 1;
+    while (true) {
+      try {
+        await octokit.repos.get({ owner: ORG, repo: finalRepoName });
+        finalRepoName = `${repoName}-${counter++}`;
+      } catch (e) {
+        if (e.status === 404) break;
+        throw e;
+      }
+    }
 
     await octokit.repos.createInOrg({
       org: ORG,
-      name: repoName,
+      name: finalRepoName,
       private: true,
     });
 
     await octokit.repos.createOrUpdateFileContents({
       owner: ORG,
-      repo: repoName,
+      repo: finalRepoName,
+      path: "README.md",
       path: "README.md",
       message: "AI generated project",
       content: Buffer.from(readmeContent).toString("base64"),
     });
 
-    const repoUrl = `${GITHUB_BASE}/${repoName}`;
+    const repoUrl = `${GITHUB_BASE}/${finalRepoName}`;
     const comment = `Репозиторий создан автоматически\n${repoUrl}`;
 
     await fetch(
