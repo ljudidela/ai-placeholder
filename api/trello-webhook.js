@@ -254,7 +254,7 @@ ${cardDesc}`;
       body: JSON.stringify({
         model: "sonar",
         messages: [{ role: "user", content: prompt }],
-        max_tokens: 4000,
+        max_tokens: 8000,
         temperature: 0.4,
       }),
     });
@@ -296,28 +296,83 @@ ${cardDesc}`;
         "Не удалось распарсить JSON от Perplexity:",
         parseErr.message
       );
+      console.log(
+        `Длина ответа: ${filesJsonRaw.length} символов, последние 200:`,
+        filesJsonRaw.substring(Math.max(0, filesJsonRaw.length - 200))
+      );
 
       // пытаемся восстановить обрезанный JSON
-      // ищем последнюю закрывающую скобку объекта перед местом ошибки
       const errorPos = parseErr.message.match(/position (\d+)/)?.[1];
       if (errorPos) {
         const pos = parseInt(errorPos, 10);
+        console.log(`Ошибка на позиции ${pos}, пытаемся восстановить...`);
+
+        // стратегия 1: ищем последний валидный объект, идя назад от позиции ошибки
         let truncated = filesJsonRaw.substring(0, pos);
 
-        // пытаемся найти последний валидный объект
-        const lastObjEnd = truncated.lastIndexOf("}");
-        if (lastObjEnd > 0) {
-          truncated = truncated.substring(0, lastObjEnd + 1);
-          // закрываем массив
-          if (truncated.trim().endsWith("}")) {
+        // ищем последнюю закрывающую скобку объекта, которая не внутри строки
+        let depth = 0;
+        let inString = false;
+        let escapeNext = false;
+        let lastValidObjEnd = -1;
+
+        for (let i = truncated.length - 1; i >= 0; i--) {
+          const char = truncated[i];
+
+          if (escapeNext) {
+            escapeNext = false;
+            continue;
+          }
+
+          if (char === "\\") {
+            escapeNext = true;
+            continue;
+          }
+
+          if (char === '"' && !escapeNext) {
+            inString = !inString;
+            continue;
+          }
+
+          if (inString) continue;
+
+          if (char === "}") {
+            depth++;
+            if (depth === 1) {
+              lastValidObjEnd = i;
+            }
+          } else if (char === "{") {
+            depth--;
+            if (depth === 0 && lastValidObjEnd > 0) {
+              // нашли начало и конец последнего валидного объекта
+              truncated = truncated.substring(0, lastValidObjEnd + 1);
+              truncated += "]";
+              try {
+                fileOps = JSON.parse(truncated);
+                console.log(
+                  `Восстановлен обрезанный JSON (стратегия 1), получено ${fileOps.length} операций`
+                );
+              } catch (e2) {
+                console.log("Стратегия 1 не сработала, пробуем стратегию 2");
+              }
+              break;
+            }
+          }
+        }
+
+        // стратегия 2: если первая не сработала, просто ищем последний }
+        if (!fileOps) {
+          const lastBrace = truncated.lastIndexOf("}");
+          if (lastBrace > 0) {
+            truncated = truncated.substring(0, lastBrace + 1);
             truncated += "]";
             try {
               fileOps = JSON.parse(truncated);
               console.log(
-                `Восстановлен обрезанный JSON, получено ${fileOps.length} операций`
+                `Восстановлен обрезанный JSON (стратегия 2), получено ${fileOps.length} операций`
               );
             } catch (e2) {
-              console.log("Не удалось восстановить JSON, используем fallback");
+              console.log("Стратегия 2 не сработала");
             }
           }
         }
