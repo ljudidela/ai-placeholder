@@ -43,11 +43,11 @@ export default async function handler(req, res) {
 
   const cardDesc = cardDescRaw;
 
-  // определяем доску, к которой относится карточка (одна доска — один репозиторий)
-  let boardName =
+  const boardName = (
     payload.action?.data?.board?.name ||
-    payload.model?.board?.name ||
-    payload.model?.name;
+    payload.model?.name ||
+    "ai-board"
+  ).trim();
 
   try {
     if (!boardName) {
@@ -75,13 +75,6 @@ export default async function handler(req, res) {
     `https://api.trello.com/1/cards/${cardId}/actions?filter=commentCard&key=${process.env.TRELLO_KEY}&token=${process.env.TRELLO_TOKEN}`
   );
   const comments = await commentsRes.json();
-  const alreadyDone = comments.some((c) =>
-    c.data.text?.includes("Репозиторий создан автоматически")
-  );
-
-  if (alreadyDone) {
-    return res.status(200).end();
-  }
 
   try {
     const prompt = `Ты — senior full-stack разработчик. Создай полностью рабочий проект по описанию ниже.
@@ -247,7 +240,7 @@ ${cardDesc}`;
       owner: ORG,
       repo: finalRepoName,
       path: "README.md",
-      message: "AI generated project",
+      message: `AI: ${cardName} — ${new Date().toISOString().split("T")[0]}`,
       content: Buffer.from(readmeContent).toString("base64"),
       branch: targetBranch,
       ...(existingReadmeSha ? { sha: existingReadmeSha } : {}),
