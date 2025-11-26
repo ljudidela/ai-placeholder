@@ -147,6 +147,32 @@ ${cardDesc}`;
         });
         console.log("Создан новый репозиторий для доски:", finalRepoName);
       } else {
+        console.error(
+          "Ошибка при получении/создании репозитория:",
+          e.status,
+          e.message
+        );
+        throw e;
+      }
+    }
+
+    // безопасно обновляем README: если он уже есть — передаём sha, если нет — создаём
+    let existingReadmeSha;
+    try {
+      const { data: existing } = await octokit.repos.getContent({
+        owner: ORG,
+        repo: finalRepoName,
+        path: "README.md",
+      });
+      if (!Array.isArray(existing)) {
+        existingReadmeSha = existing.sha;
+        console.log("README.md уже существует, будет обновлён");
+      }
+    } catch (e) {
+      if (e.status === 404) {
+        console.log("README.md ещё нет, будет создан");
+      } else {
+        console.error("Ошибка при получении README.md:", e.status, e.message);
         throw e;
       }
     }
@@ -155,9 +181,9 @@ ${cardDesc}`;
       owner: ORG,
       repo: finalRepoName,
       path: "README.md",
-      path: "README.md",
       message: "AI generated project",
       content: Buffer.from(readmeContent).toString("base64"),
+      ...(existingReadmeSha ? { sha: existingReadmeSha } : {}),
     });
 
     const repoUrl = `${GITHUB_BASE}/${finalRepoName}`;
