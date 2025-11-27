@@ -6,8 +6,11 @@ const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
 const ORG = "ljudidela";
 const GITHUB_BASE = `https://github.com/${ORG}`;
 
+// Глобальная Map для дедупликации (переживает вызовы функций)
+const processedCards = new Map();
+
 export default async function handler(req, res) {
-  const processedCards = new Map(); // или Redis/external storage
+  // Убрать отсюда: const processedCards = new Map();
 
   // Очистка старых записей
   for (const [key, timestamp] of processedCards.entries()) {
@@ -40,10 +43,17 @@ export default async function handler(req, res) {
   const cardId = card.id;
 
   const cardKey = `${cardId}_${payload.action?.date || Date.now()}`;
+  console.log(`Обработка карточки ${cardId}, ключ: ${cardKey}`);
+  console.log(
+    `Текущие обработанные карточки:`,
+    Array.from(processedCards.keys())
+  );
+
   if (processedCards.has(cardKey)) {
-    console.log(`Карточка ${cardId} уже обрабатывается, пропускаем`);
+    console.log(`❌ Карточка ${cardId} уже обрабатывается, пропускаем`);
     return res.status(200).end();
   }
+  console.log(`✅ Начинаем обработку карточки ${cardId}`);
   processedCards.set(cardKey, Date.now());
 
   if (!cardName || !cardId || !cardDescRaw) return res.status(200).end();
