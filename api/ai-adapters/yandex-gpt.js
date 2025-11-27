@@ -70,6 +70,12 @@ export class YandexGPTAdapter {
 
     if (!response.ok) {
       const errorText = await response.text();
+      console.log(`YANDEX GPT ERROR RESPONSE:`, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers.entries()),
+        body: errorText,
+      });
       throw new Error(`YandexGPT error ${response.status}: ${errorText}`);
     }
 
