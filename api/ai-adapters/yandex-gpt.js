@@ -2,12 +2,12 @@ export class YandexGPTAdapter {
   constructor() {
     this.name = "yandex-gpt";
     // Любая модель из твоего списка в UI — просто пиши как строку
-    this.model = "yandexgpt-5-1-pro-rc";
+    this.modelUri = `gpt://${process.env.YANDEX_FOLDER_ID}/yandexgpt-5-1-pro-rc`;
     // Если хочешь Qwen3 — просто: "qwen3-235b-a22b-fp8/latest"
   }
 
   async generateCode(prompt) {
-    console.log(`YANDEX GPT (OpenAI API) → ${this.model}`);
+    console.log(`YANDEX GPT (OpenAI API) → ${this.modelUri}`);
 
     const response = await fetch(
       "https://llm.api.cloud.yandex.net/foundationModels/v1/chat/completions", // ← ЭТОТ ЭНДПОИНТ РАБОТАЕТ КАК В UI
@@ -19,7 +19,7 @@ export class YandexGPTAdapter {
           "X-Folder-Id": process.env.YANDEX_FOLDER_ID, // ← Обязательно для OpenAI-совместимого режима!
         },
         body: JSON.stringify({
-          model: this.model,
+          modelUri: this.modelUri,
           temperature: 0.3,
           max_tokens: 16000,
           messages: [
