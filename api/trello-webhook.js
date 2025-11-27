@@ -250,8 +250,8 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         model: "sonar-pro",
         messages: [{ role: "user", content: prompt }],
-        max_tokens: 32000, // Подними, чтоб уместить больше (твой 16k маловато для кода + README)
-        temperature: 0.2, // Ещё ниже для строгого формата
+        max_tokens: 16000, // Подними, чтоб уместить больше (твой 16k маловато для кода + README)
+        temperature: 0.4, // Ещё ниже для строгого формата
         response_format: {
           type: "json_schema",
           json_schema: {
