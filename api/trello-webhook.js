@@ -226,26 +226,13 @@ export default async function handler(req, res) {
     const prompt = `Ты — senior разработчик.
 
 ${existingRepoContext}
+____________________
+Описание задачи: ${cardDesc}
 
-КРИТИЧЕСКИ ВАЖНО:
-- Возвращай ТОЛЬКО валидный JSON-массив, БЕЗ markdown-обёрток, БЕЗ пояснений.
-- Формат: [{"path": "путь/к/файлу", "action": "create" или "update" или "delete", "content": "содержимое файла"}, ...]
-- В поле "content" ВСЕ специальные символы должны быть правильно экранированы для JSON:
-  * переносы строк: двойной обратный слеш + n
-  * кавычки: двойной обратный слеш + кавычка
-  * обратные слеши: четыре обратных слеша подряд
-  * табы: двойной обратный слеш + t
-- НЕ используй markdown-блоки кода внутри content.
-- Путь без начального слеша. Примеры: "README.md", "package.json", "src/main.tsx".
-- Для action="delete" поле "content" должно быть пустой строкой "".
+Описание задачи: ${cardDesc}
 
-Пример правильного JSON:
-[{"path": "README.md", "action": "create", "content": "# Title\\\\n\\\\nDescription"}]
-
-Ограничь каждый "content" до 6000 символов. Если файл больше — разбей на части с суффиксом .part1, .part2 и т.д., а потом склей.
-
-Описание задачи:
-${cardDesc}`;
+Верни массив операций с файлами в формате, соответствующем схеме: path (string), action (create/update/delete), content (string с экранированным содержимым).
+`;
 
     console.log(
       "ПЕРПЛЕКСИТИ СТАРТУЕТ, ТОКЕН:",
@@ -260,10 +247,44 @@ ${cardDesc}`;
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "sonar-reasoning",
+        model: "sonar-pro",
         messages: [{ role: "user", content: prompt }],
-        max_tokens: 32000,
-        temperature: 0.2,
+        max_tokens: 32000, // Подними, чтоб уместить больше (твой 16k маловато для кода + README)
+        temperature: 0.1, // Ещё ниже для строгого формата
+        response_format: {
+          // ← Вот магия
+          type: "json_schema",
+          json_schema: {
+            name: "file_operations", // Имя схемы (опционально)
+            schema: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  path: {
+                    type: "string",
+                    description:
+                      "Путь к файлу, без слеша в начале (e.g., 'README.md')",
+                  },
+                  action: {
+                    type: "string",
+                    enum: ["create", "update", "delete"],
+                    description: "Действие с файлом",
+                  },
+                  content: {
+                    type: "string",
+                    description:
+                      'Содержимое файла (экранированное для JSON: \\n для переносов, \\" для кавычек)',
+                  },
+                },
+                required: ["path", "action"], // content опционально для delete
+                additionalProperties: false, // Запрещаем лишние поля — строго!
+              },
+              minItems: 0, // Может быть пустым массивом, если ничего не менять
+              maxItems: 50, // Лимит на 50 файлов, чтоб не раздувать
+            },
+          },
+        },
       }),
     });
 
