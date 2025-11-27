@@ -42,7 +42,7 @@ export default async function handler(req, res) {
   const cardDescRaw = (card.desc || "").trim();
   const cardId = card.id;
 
-  const cardKey = `${cardId}_${payload.action?.date || Date.now()}`;
+  const cardKey = cardId;
   console.log(`Обработка карточки ${cardId}, ключ: ${cardKey}`);
   console.log(
     `Текущие обработанные карточки:`,
