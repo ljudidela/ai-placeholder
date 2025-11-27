@@ -7,6 +7,23 @@ const ORG = "ljudidela";
 const GITHUB_BASE = `https://github.com/${ORG}`;
 
 export default async function handler(req, res) {
+  const processedCards = new Map(); // или Redis/external storage
+
+  const cardKey = `${cardId}_${payload.action?.date || Date.now()}`;
+  if (processedCards.has(cardKey)) {
+    console.log(`Карточка ${cardId} уже обрабатывается, пропускаем`);
+    return res.status(200).end();
+  }
+  processedCards.set(cardKey, Date.now());
+
+  // Очистка старых записей
+  for (const [key, timestamp] of processedCards.entries()) {
+    if (Date.now() - timestamp > 5 * 60 * 1000) {
+      // 5 минут
+      processedCards.delete(key);
+    }
+  }
+
   if (req.method === "HEAD" || req.method === "GET") {
     return res.status(200).send("ok");
   }

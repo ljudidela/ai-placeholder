@@ -12,7 +12,7 @@ export class QwenAdapter {
     const jsonSchema = {
       type: "array",
       minItems: 1,
-      maxItems: 50,
+      maxItems: 60,
       items: {
         type: "object",
         required: ["path", "action", "content"],
@@ -27,7 +27,7 @@ export class QwenAdapter {
 
     const requestBody = {
       model: this.modelUri, // ← model, а не modelUri
-      temperature: 0.1,
+      temperature: 0.3,
       max_tokens: 16000,
       response_format: {
         type: "json_schema",
