@@ -1,5 +1,6 @@
 import { Octokit } from "@octokit/rest";
 import raw from "raw-body";
+import { getAdapter } from "./ai-adapters/index.js";
 
 const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
 const ORG = "ljudidela";
@@ -235,81 +236,33 @@ export default async function handler(req, res) {
       Сначала обнови README.md, потом package.json, потом основные файлы src/.
       Если файл большой — всё равно возвращай полностью, схема это поддерживает.`;
 
-    console.log(
-      "ПЕРПЛЕКСИТИ СТАРТУЕТ, ТОКЕН:",
-      process.env.PERPLEXITY_KEY ? "ЕСТЬ" : "НЕТ"
-    );
+    // Выбор провайдера через переменную окружения
+    const AI_PROVIDER = process.env.AI_PROVIDER || "perplexity"; // 'perplexity' или 'yandex'
+
     console.log("ПРОМПТ ОТПРАВЛЯЕМ:", prompt.substring(0, 300) + "...");
 
-    const aiRes = await fetch("https://api.perplexity.ai/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.PERPLEXITY_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "sonar-pro",
-        messages: [{ role: "user", content: prompt }],
-        max_tokens: 16000, // Подними, чтоб уместить больше (твой 16k маловато для кода + README)
-        temperature: 0.4, // Ещё ниже для строгого формата
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "file_operations",
-            strict: true, // ← ЭТО ГЛАВНОЕ! Без него схема НЕ работает на sonar-pro
-            schema: {
-              type: "array",
-              items: {
-                type: "object",
-                properties: {
-                  path: {
-                    type: "string",
-                    description:
-                      "Путь к файлу, без слеша в начале (e.g., 'README.md')",
-                  },
-                  action: {
-                    type: "string",
-                    enum: ["create", "update", "delete"],
-                  },
-                  content: {
-                    type: "string",
-                    description:
-                      "Содержимое файла (экранированное: \\n для переноса строки)",
-                  },
-                },
-                required: ["path", "action"],
-                additionalProperties: false,
-              },
-              minItems: 0,
-              maxItems: 50,
-            },
-          },
-        },
-      }),
-    });
+    // Получаем адаптер
+    const aiAdapter = getAdapter(AI_PROVIDER);
 
-    if (!aiRes.ok) throw new Error("Perplexity: " + (await aiRes.text()));
-    const aiData = await aiRes.json();
-
-    let filesJsonRaw = aiData.choices[0].message.content.trim();
-
-    console.log("ПЕРПЛЕКСИТИ ОТВЕТИЛ (первые 1000 символов):");
-    console.log(
-      filesJsonRaw.substring(0, 1000) +
-        (filesJsonRaw.length > 1000 ? "\n... (обрезано)" : "")
-    );
-
-    // Больше никаких ```json
+    // Генерируем код через адаптер
     let fileOps;
     try {
-      fileOps = JSON.parse(filesJsonRaw);
-      console.log(`Схема сработала! Получено ${fileOps.length} операций`);
+      fileOps = await aiAdapter.generateCode(prompt);
+      console.log(
+        `Схема сработала! Получено ${fileOps.length} операций от ${AI_PROVIDER}`
+      );
     } catch (parseErr) {
       console.error(
-        "JSON.parse провалился даже со strict: true — это очень странно"
+        `JSON.parse провалился для ${AI_PROVIDER}:`,
+        parseErr.message
       );
-      console.error("Первые 500 символов:", filesJsonRaw.substring(0, 500));
-      throw new Error("AI вернул невалидный JSON несмотря на strict schema");
+      console.error(
+        "Первые 500 символов:",
+        parseErr.content?.substring(0, 500) || "N/A"
+      );
+      throw new Error(
+        `AI (${AI_PROVIDER}) вернул невалидный JSON: ${parseErr.message}`
+      );
     }
 
     if (!Array.isArray(fileOps)) {
