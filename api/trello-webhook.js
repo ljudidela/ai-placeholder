@@ -242,6 +242,8 @@ ${existingRepoContext}
 Пример правильного JSON:
 [{"path": "README.md", "action": "create", "content": "# Title\\\\n\\\\nDescription"}]
 
+Ограничь каждый "content" до 6000 символов. Если файл больше — разбей на части с суффиксом .part1, .part2 и т.д., а потом склей.
+
 Описание задачи:
 ${cardDesc}`;
 
@@ -258,10 +260,10 @@ ${cardDesc}`;
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "sonar-pro",
+        model: "sonar-reasoning",
         messages: [{ role: "user", content: prompt }],
-        max_tokens: 16000,
-        temperature: 0.3,
+        max_tokens: 32000,
+        temperature: 0.2,
       }),
     });
 
