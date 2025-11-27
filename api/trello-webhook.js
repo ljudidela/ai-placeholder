@@ -225,14 +225,15 @@ export default async function handler(req, res) {
   try {
     const prompt = `Ты — senior разработчик.
 
-${existingRepoContext}
-____________________
-Описание задачи: ${cardDesc}
+      ${existingRepoContext}
 
-Описание задачи: ${cardDesc}
+      Задача:
+      ${cardDesc}
 
-Верни массив операций с файлами в формате, соответствующем схеме: path (string), action (create/update/delete), content (string с экранированным содержимым).
-`;
+      Верни изменения строго по JSON-схеме (ни одного лишнего символа, никаких пояснений):
+      массив объектов {path, action, content}.
+      Сначала обнови README.md, потом package.json, потом основные файлы src/.
+      Если файл большой — всё равно возвращай полностью, схема это поддерживает.`;
 
     console.log(
       "ПЕРПЛЕКСИТИ СТАРТУЕТ, ТОКЕН:",
@@ -250,12 +251,12 @@ ____________________
         model: "sonar-pro",
         messages: [{ role: "user", content: prompt }],
         max_tokens: 32000, // Подними, чтоб уместить больше (твой 16k маловато для кода + README)
-        temperature: 0.1, // Ещё ниже для строгого формата
+        temperature: 0.2, // Ещё ниже для строгого формата
         response_format: {
-          // ← Вот магия
           type: "json_schema",
           json_schema: {
-            name: "file_operations", // Имя схемы (опционально)
+            name: "file_operations",
+            strict: true, // ← ЭТО ГЛАВНОЕ! Без него схема НЕ работает на sonar-pro
             schema: {
               type: "array",
               items: {
@@ -269,19 +270,18 @@ ____________________
                   action: {
                     type: "string",
                     enum: ["create", "update", "delete"],
-                    description: "Действие с файлом",
                   },
                   content: {
                     type: "string",
                     description:
-                      'Содержимое файла (экранированное для JSON: \\n для переносов, \\" для кавычек)',
+                      "Содержимое файла (экранированное: \\n для переноса строки)",
                   },
                 },
-                required: ["path", "action"], // content опционально для delete
-                additionalProperties: false, // Запрещаем лишние поля — строго!
+                required: ["path", "action"],
+                additionalProperties: false,
               },
-              minItems: 0, // Может быть пустым массивом, если ничего не менять
-              maxItems: 50, // Лимит на 50 файлов, чтоб не раздувать
+              minItems: 0,
+              maxItems: 50,
             },
           },
         },
@@ -290,6 +290,7 @@ ____________________
 
     if (!aiRes.ok) throw new Error("Perplexity: " + (await aiRes.text()));
     const aiData = await aiRes.json();
+
     let filesJsonRaw = aiData.choices[0].message.content.trim();
 
     console.log("ПЕРПЛЕКСИТИ ОТВЕТИЛ (первые 1000 символов):");
@@ -298,272 +299,17 @@ ____________________
         (filesJsonRaw.length > 1000 ? "\n... (обрезано)" : "")
     );
 
-    // иногда модель может вернуть ```json ... ``` — аккуратно вырезаем
-    let jsonMatch = filesJsonRaw.match(/```json([\s\S]*?)```/i);
-    if (jsonMatch) {
-      filesJsonRaw = jsonMatch[1].trim();
-    } else {
-      // может быть просто ``` без json
-      jsonMatch = filesJsonRaw.match(/```([\s\S]*?)```/);
-      if (jsonMatch) {
-        filesJsonRaw = jsonMatch[1].trim();
-      }
-    }
-
-    // пытаемся найти начало JSON-массива
-    const arrayStart = filesJsonRaw.indexOf("[");
-    if (arrayStart > 0) {
-      filesJsonRaw = filesJsonRaw.substring(arrayStart);
-      console.log("Найдено начало массива, обрезано", arrayStart, "символов");
-    }
-
+    // Больше никаких ```json
     let fileOps;
     try {
       fileOps = JSON.parse(filesJsonRaw);
+      console.log(`Схема сработала! Получено ${fileOps.length} операций`);
     } catch (parseErr) {
       console.error(
-        "Не удалось распарсить JSON от Perplexity:",
-        parseErr.message
+        "JSON.parse провалился даже со strict: true — это очень странно"
       );
-      console.log(
-        `Длина ответа: ${filesJsonRaw.length} символов, последние 200:`,
-        filesJsonRaw.substring(Math.max(0, filesJsonRaw.length - 200))
-      );
-
-      // стратегия 0: пытаемся извлечь объекты вручную, парся по частям
-      // ищем начало каждого объекта {"path": и пытаемся извлечь его целиком
-      try {
-        const extracted = [];
-        let searchPos = 0;
-
-        while (true) {
-          // ищем начало объекта разными способами
-          let objStart = filesJsonRaw.indexOf('{"path"', searchPos);
-          if (objStart === -1)
-            objStart = filesJsonRaw.indexOf('{ "path"', searchPos);
-          if (objStart === -1)
-            objStart = filesJsonRaw.indexOf('{\n  "path"', searchPos);
-          if (objStart === -1) {
-            // пробуем найти просто "path" и идти назад до {
-            const pathPos = filesJsonRaw.indexOf('"path"', searchPos);
-            if (pathPos !== -1) {
-              for (let i = pathPos; i >= 0 && i >= pathPos - 50; i--) {
-                if (filesJsonRaw[i] === "{") {
-                  objStart = i;
-                  break;
-                }
-              }
-            }
-          }
-          if (objStart === -1) break;
-
-          // ищем конец объекта - закрывающую }
-          let depth = 0;
-          let inString = false;
-          let escapeNext = false;
-          let objEnd = -1;
-
-          for (let i = objStart; i < filesJsonRaw.length; i++) {
-            const char = filesJsonRaw[i];
-
-            if (escapeNext) {
-              escapeNext = false;
-              continue;
-            }
-
-            if (char === "\\") {
-              escapeNext = true;
-              continue;
-            }
-
-            if (char === '"' && !escapeNext) {
-              inString = !inString;
-              continue;
-            }
-
-            if (inString) continue;
-
-            if (char === "{") depth++;
-            if (char === "}") {
-              depth--;
-              if (depth === 0) {
-                objEnd = i;
-                break;
-              }
-            }
-          }
-
-          if (objEnd > objStart) {
-            const objStr = filesJsonRaw.substring(objStart, objEnd + 1);
-            try {
-              const parsed = JSON.parse(objStr);
-              if (parsed.path && parsed.action) {
-                // JSON.parse уже правильно декодировал все экранированные символы
-                // content уже в правильном виде, не трогаем его
-                extracted.push(parsed);
-                console.log(
-                  `✓ Извлечён объект: ${parsed.path} (${parsed.action})`
-                );
-              }
-            } catch (e) {
-              // этот объект невалиден, пробуем regex
-              try {
-                // используем более умный regex, который правильно обрабатывает экранированные символы
-                const pathMatch = objStr.match(
-                  /"path"\s*:\s*"((?:[^"\\]|\\.)*)"/
-                );
-                const actionMatch = objStr.match(
-                  /"action"\s*:\s*"((?:[^"\\]|\\.)*)"/
-                );
-                // для content нужно захватить всё до закрывающей кавычки, учитывая экранирование
-                const contentMatch = objStr.match(
-                  /"content"\s*:\s*"((?:[^"\\]|\\.)*)"/
-                );
-
-                if (pathMatch && actionMatch) {
-                  const path = pathMatch[1].replace(/\\(.)/g, "$1"); // декодируем экранированные символы
-                  const action = actionMatch[1].replace(/\\(.)/g, "$1");
-                  let content = contentMatch ? contentMatch[1] : "";
-
-                  // декодируем экранированные символы в content
-                  // заменяем \\n на \n, \\t на \t и т.д.
-                  content = content.replace(/\\(.)/g, (match, char) => {
-                    switch (char) {
-                      case "n":
-                        return "\n";
-                      case "t":
-                        return "\t";
-                      case "r":
-                        return "\r";
-                      case '"':
-                        return '"';
-                      case "\\":
-                        return "\\";
-                      default:
-                        return match; // оставляем как есть, если не знаем
-                    }
-                  });
-
-                  extracted.push({ path, action, content });
-                  console.log(`✓ Извлечён объект (regex): ${path} (${action})`);
-                }
-              } catch (regexErr) {
-                // пропускаем этот объект
-              }
-            }
-            searchPos = objEnd + 1;
-          } else {
-            break;
-          }
-        }
-
-        if (extracted.length > 0) {
-          fileOps = extracted;
-          console.log(
-            `Извлечено ${extracted.length} объектов через ручной парсинг (стратегия 0)`
-          );
-        }
-      } catch (manualErr) {
-        console.log(
-          "Стратегия 0 (ручной парсинг) не сработала:",
-          manualErr.message
-        );
-      }
-
-      // пытаемся восстановить обрезанный JSON
-      const errorPos = parseErr.message.match(/position (\d+)/)?.[1];
-      if (errorPos) {
-        const pos = parseInt(errorPos, 10);
-        console.log(`Ошибка на позиции ${pos}, пытаемся восстановить...`);
-
-        // стратегия 1: ищем последний валидный объект, идя назад от позиции ошибки
-        let truncated = filesJsonRaw.substring(0, pos);
-
-        // ищем последнюю закрывающую скобку объекта, которая не внутри строки
-        let depth = 0;
-        let inString = false;
-        let escapeNext = false;
-        let lastValidObjEnd = -1;
-
-        for (let i = truncated.length - 1; i >= 0; i--) {
-          const char = truncated[i];
-
-          if (escapeNext) {
-            escapeNext = false;
-            continue;
-          }
-
-          if (char === "\\") {
-            escapeNext = true;
-            continue;
-          }
-
-          if (char === '"' && !escapeNext) {
-            inString = !inString;
-            continue;
-          }
-
-          if (inString) continue;
-
-          if (char === "}") {
-            depth++;
-            if (depth === 1) {
-              lastValidObjEnd = i;
-            }
-          } else if (char === "{") {
-            depth--;
-            if (depth === 0 && lastValidObjEnd > 0) {
-              // нашли начало и конец последнего валидного объекта
-              truncated = truncated.substring(0, lastValidObjEnd + 1);
-              truncated += "]";
-              try {
-                fileOps = JSON.parse(truncated);
-                console.log(
-                  `Восстановлен обрезанный JSON (стратегия 1), получено ${fileOps.length} операций`
-                );
-              } catch (e2) {
-                console.log("Стратегия 1 не сработала, пробуем стратегию 2");
-              }
-              break;
-            }
-          }
-        }
-
-        // стратегия 2: если первая не сработала, просто ищем последний }
-        if (!fileOps) {
-          const lastBrace = truncated.lastIndexOf("}");
-          if (lastBrace > 0) {
-            truncated = truncated.substring(0, lastBrace + 1);
-            truncated += "]";
-            try {
-              fileOps = JSON.parse(truncated);
-              console.log(
-                `Восстановлен обрезанный JSON (стратегия 2), получено ${fileOps.length} операций`
-              );
-            } catch (e2) {
-              console.log("Стратегия 2 не сработала");
-            }
-          }
-        }
-      }
-
-      // если всё ещё не получилось — НЕ делаем fallback на README
-      // лучше вернуть ошибку, чем записать весь ответ в README
-      if (!fileOps) {
-        console.error(
-          "КРИТИЧЕСКАЯ ОШИБКА: Не удалось извлечь ни одного файла из ответа ИИ"
-        );
-        console.error(
-          "Первые 500 символов ответа:",
-          filesJsonRaw.substring(0, 500)
-        );
-        throw new Error(
-          "AI вернул невалидный JSON, и не удалось извлечь файлы. " +
-            "Проверь промпт и формат ответа. Длина ответа: " +
-            filesJsonRaw.length +
-            " символов"
-        );
-      }
+      console.error("Первые 500 символов:", filesJsonRaw.substring(0, 500));
+      throw new Error("AI вернул невалидный JSON несмотря на strict schema");
     }
 
     if (!Array.isArray(fileOps)) {
