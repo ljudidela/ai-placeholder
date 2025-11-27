@@ -42,8 +42,10 @@ export default async function handler(req, res) {
   const cardDescRaw = (card.desc || "").trim();
   const cardId = card.id;
 
-  const cardKey = cardId;
-  console.log(`Обработка карточки ${cardId}, ключ: ${cardKey}`);
+  // Разные ключи для разных типов действий
+  const cardKey = `${cardId}_${actionType}`;
+
+  console.log(`Action type: ${actionType}, Card: ${cardId}, Key: ${cardKey}`);
   console.log(
     `Текущие обработанные карточки:`,
     Array.from(processedCards.keys())
