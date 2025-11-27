@@ -9,13 +9,6 @@ const GITHUB_BASE = `https://github.com/${ORG}`;
 export default async function handler(req, res) {
   const processedCards = new Map(); // или Redis/external storage
 
-  const cardKey = `${cardId}_${payload.action?.date || Date.now()}`;
-  if (processedCards.has(cardKey)) {
-    console.log(`Карточка ${cardId} уже обрабатывается, пропускаем`);
-    return res.status(200).end();
-  }
-  processedCards.set(cardKey, Date.now());
-
   // Очистка старых записей
   for (const [key, timestamp] of processedCards.entries()) {
     if (Date.now() - timestamp > 5 * 60 * 1000) {
@@ -45,6 +38,13 @@ export default async function handler(req, res) {
   const cardName = card.name?.trim();
   const cardDescRaw = (card.desc || "").trim();
   const cardId = card.id;
+
+  const cardKey = `${cardId}_${payload.action?.date || Date.now()}`;
+  if (processedCards.has(cardKey)) {
+    console.log(`Карточка ${cardId} уже обрабатывается, пропускаем`);
+    return res.status(200).end();
+  }
+  processedCards.set(cardKey, Date.now());
 
   if (!cardName || !cardId || !cardDescRaw) return res.status(200).end();
 
