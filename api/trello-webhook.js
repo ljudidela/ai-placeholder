@@ -256,6 +256,7 @@ ${cardDesc}
       }
     }
 
+    // После успешного завершения всех операций
     const repoUrl = `${GITHUB_BASE}/${finalRepoName}`;
     const comment = `Репозиторий обновлён\n${repoUrl}\n\nУспешно: ${results.success.length}\nОшибок: ${results.failed.length}`;
 
@@ -266,6 +267,9 @@ ${cardDesc}
       { method: "POST" }
     ).catch(() => {});
 
+    // ✅ Снимаем блокировку ПОСЛЕ успешного завершения
+    processedCards.delete(cardKey);
+
     res.status(200).json({
       success: true,
       repo: repoUrl,
@@ -274,6 +278,10 @@ ${cardDesc}
     });
   } catch (err) {
     console.error("Критическая ошибка:", err);
+
+    // ❌ Снимаем блокировку при ошибке
+    processedCards.delete(cardKey);
+
     await fetch(
       `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${
         process.env.TRELLO_KEY
