@@ -1,42 +1,73 @@
 export class YandexGPTAdapter {
   constructor() {
     this.name = "yandex-gpt";
-    this.modelUri = `gpt://${process.env.YANDEX_FOLDER_ID}/qwen3-235b-a22b-fp8/latest`;
+    // Для OpenAI API: модель как строка (не modelUri). Qwen3 — ок, или "yandexgpt-5-1-pro-rc"
+    this.model = "qwen3-235b-a22b-fp8/latest";
   }
 
   async generateCode(prompt) {
     console.log(
-      `YANDEX GPT Qwen3 СТАРТУЕТ (folder: ${process.env.YANDEX_FOLDER_ID})`
+      `YANDEX GPT Qwen3 OpenAI API СТАРТУЕТ (folder: ${process.env.YANDEX_FOLDER_ID})`
     );
 
     const response = await fetch(
-      "https://llm.api.cloud.yandex.net/foundationModels/v1/completion", // Фикс: правильный endpoint (не /chat/completions)
+      "https://llm.api.cloud.yandex.net/foundationModels/v1/chat/completions",
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Api-Key ${process.env.YANDEX_API_KEY}`,
+          // Добавь folder_id в header, если API требует (из docs для некоторых моделей)
+          "X-Folder-ID": process.env.YANDEX_FOLDER_ID,
         },
         body: JSON.stringify({
-          modelUri: this.modelUri,
-          completionOptions: {
-            // Фикс: параметры в completionOptions (docs требуют)
-            stream: false,
-            temperature: 0.3,
-            maxTokens: 16000,
-          },
+          model: this.model, // Фикс: 'model' как строка (OpenAI-style)
           messages: [
-            // Фикс: messages для chat-режима (работает в /completion)
-            // System-промпт минимальный (или удали, если UI-инструкция хватит)
+            // Фикс: Стандартные messages (без completionOptions)
             {
               role: "system",
-              text: "Ты агент-программист. Следуй инструкциям и схеме. Отвечай ТОЛЬКО чистым JSON-массивом операций (без текста, markdown).",
+              content:
+                "Ты агент-программист. Следуй инструкциям и схеме. Отвечай ТОЛЬКО чистым JSON-массивом операций (без текста, markdown).", // Минимальный, опционально удали
             },
             {
               role: "user",
-              text: prompt, // Задача от пользователя
+              content: prompt,
             },
           ],
+          temperature: 0.3,
+          max_tokens: 16000, // Фикс: max_tokens (не maxTokens)
+          response_format: {
+            // Фикс: Native json_schema support в OpenAI API!
+            type: "json_schema",
+            json_schema: {
+              name: "file_operations",
+              strict: true,
+              schema: {
+                type: "array",
+                items: {
+                  type: "object",
+                  properties: {
+                    path: {
+                      type: "string",
+                      description:
+                        "Путь к файлу без слеша в начале (например, 'src/index.js')",
+                    },
+                    action: {
+                      type: "string",
+                      enum: ["create", "update", "delete"],
+                    },
+                    content: {
+                      type: ["string", "null"],
+                      description:
+                        "Содержимое файла, \\n для переносов. Для delete можно null",
+                    },
+                  },
+                  required: ["path", "action"],
+                  additionalProperties: false,
+                },
+              },
+            },
+          },
         }),
       }
     );
@@ -53,13 +84,7 @@ export class YandexGPTAdapter {
     }
 
     const data = await response.json();
-    let content = data.result.alternatives[0].message.text.trim(); // Фикс: .text (не .content)
-
-    // Fallback для очистки JSON (если добавит мусор)
-    const jsonMatch = content.match(/[\[\{].*[\]\}]/s);
-    if (jsonMatch) {
-      content = jsonMatch[0];
-    }
+    const content = data.choices[0].message.content.trim(); // Фикс: OpenAI-style path (.choices[0].message.content)
 
     console.log("YANDEX GPT ОТВЕТИЛ (первые 1000 символов):");
     console.log(
@@ -67,6 +92,7 @@ export class YandexGPTAdapter {
         (content.length > 1000 ? "\n... (обрезано)" : "")
     );
 
+    // С strict: true — всегда чистый JSON, fallback не нужен, но оставил для safety
     try {
       return JSON.parse(content);
     } catch (parseError) {
