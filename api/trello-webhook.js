@@ -239,7 +239,7 @@ export default async function handler(req, res) {
     // Выбор провайдера через переменную окружения
     const AI_PROVIDER = process.env.AI_PROVIDER || "perplexity"; // 'perplexity' или 'yandex'
 
-    console.log("ПРОМПТ ОТПРАВЛЯЕМ:", prompt.substring(0, 300) + "...");
+    console.log("ПРОМПТ ОТПРАВЛЯЕМ:", prompt);
 
     // Получаем адаптер
     const aiAdapter = getAdapter(AI_PROVIDER);
