@@ -2,7 +2,7 @@ export class YandexGPTAdapter {
   constructor() {
     this.name = "yandex-gpt";
     // Любая модель из твоего списка в UI — просто пиши как строку
-    this.modelUri = `gpt://${process.env.YANDEX_FOLDER_ID}/yandexgpt-5-1-pro-rc`;
+    this.modelUri = `gpt://${process.env.YANDEX_FOLDER_ID}/yandexgpt/rc`;
     // Если хочешь Qwen3 — просто: "qwen3-235b-a22b-fp8/latest"
   }
 
