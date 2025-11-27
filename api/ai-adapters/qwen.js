@@ -1,5 +1,3 @@
-// ai-adapters/yandex-gpt.js
-
 export class QwenAdapter {
   constructor() {
     this.name = "qwen";
@@ -60,7 +58,7 @@ export class QwenAdapter {
     console.log(JSON.stringify(requestBody, null, 2));
 
     const response = await fetch(
-      "https://llm.api.cloud.yandex.net/foundationModels/v1/chat/completions",
+      "https://llm.api.cloud.yandex.net/v1/chat/completions",
       {
         method: "POST",
         headers: {
