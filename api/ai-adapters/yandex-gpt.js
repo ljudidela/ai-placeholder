@@ -1,7 +1,7 @@
 export class YandexGPTAdapter {
   constructor() {
     this.name = "yandex-gpt";
-    this.modelUri = `gpt://${process.env.YANDEX_FOLDER_ID}/aliceai-llm/latest`;
+    this.modelUri = `gpt://${process.env.YANDEX_FOLDER_ID}/yandexgpt/rc`;
   }
 
   async generateCode(prompt) {
