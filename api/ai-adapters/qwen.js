@@ -8,7 +8,7 @@ export class QwenAdapter {
     console.log(`GEMINI (NeuroAPI) → /v1/chat/completions`);
     console.log(`   Модель: ${this.modelUri}`);
 
-    // Схема по докам Gemini 2025: type как array для null, без enum (в промпте)
+    // Схема для Gemini (без enum, type как массив)
     const jsonSchema = {
       type: "array",
       minItems: 1,
@@ -19,15 +19,15 @@ export class QwenAdapter {
         additionalProperties: false,
         properties: {
           path: { type: "string" },
-          action: { type: "string" }, // Без enum — Gemini косячит на "not repeating"
-          content: { type: ["string", "null"] }, // Array для null, как в 
+          action: { type: "string" },
+          content: { type: ["string", "null"] },
         },
       },
     };
 
     const requestBody = {
       model: this.modelUri,
-      temperature: 0.1, // Понизил для стабильности (меньше креатива в MD)
+      temperature: 0.1,
       max_tokens: 32000,
       generation_config: {
         response_mime_type: "application/json",
@@ -36,10 +36,10 @@ export class QwenAdapter {
       messages: [
         {
           role: "system",
-          content: `Ты — автономный агент-программист, который общается с внешним миром ТОЛЬКО через строго структурированный JSON по указанной ниже схеме. 
+          content: `Ты — автономный агент-программист, который общается с внешним миром ТОЛЬКО через строго структурированный JSON по указанной ниже схеме.
 
 Правила, которые ты обязан соблюдать без единого исключения:
-1. Отвечай ИСКЛЮЧИТЕЛЬНО валидным JSON, соответствующим схеме. Никакого текста до, после или внутри JSON быть не должно. НЕ добавляй markdown, backticks (```json
+1. Отвечай ИСКЛЮЧИТЕЛЬНО валидным JSON, соответствующим схеме. Никакого текста до, после или внутри JSON быть не должно. НЕ добавляй markdown, backticks или \`\`\`json.
 2. Не пиши объяснения, не пиши комментарии, не используй markdown.
 3. Если нужно создать/обновить файл — указывай точный относительный путь без начального слеша.
 4. В поле content используй \\n для переноса строки и экранируй обратные слеши, кавычки и другие спецсимволы, если они есть в коде. Если контент пустой — используй null.
@@ -71,7 +71,9 @@ export class QwenAdapter {
 
     if (!response.ok) {
       const err = await response.text();
-      console.error(`\nNEUROAPI ERROR ${response.status}: ${err.substring(0, 500)}`);
+      console.error(
+        `\nNEUROAPI ERROR ${response.status}: ${err.substring(0, 500)}`
+      );
       throw new Error(`NeuroAPI/Gemini: ${response.status} ${err}`);
     }
 
@@ -83,9 +85,15 @@ export class QwenAdapter {
       throw new Error("Пустой ответ");
     }
 
-    // ФИКС: Очистка MD-обёртки (```json ... ```) — по примерам из 
-    rawContent = rawContent.replace(/^```json\s*\n?/, "").replace(/\n?```\s*$/, "").trim();
-    console.log(`\nОЧИЩЕННЫЙ RAW ОТВЕТ (после удаления MD): Длина: ${rawContent.length} символов`);
+    // Убираем \`\`\`json и \`\`\`
+    rawContent = rawContent
+      .replace(/^```json\s*\n?/, "")
+      .replace(/\n?```\s*$/, "")
+      .trim();
+
+    console.log(
+      `\nОЧИЩЕННЫЙ RAW ОТВЕТ (после удаления MD): Длина: ${rawContent.length} символов`
+    );
 
     console.log(`ОЧИЩЕННЫЙ RAW (начало + середина + конец):`);
     const chunk = 600;
@@ -108,7 +116,6 @@ export class QwenAdapter {
     console.log(`   └─ КОНЕЦ ───────────────────────────────────────`);
     console.log(end);
 
-    // Чистый JSON — парсим без хаков
     let parsed;
     try {
       parsed = JSON.parse(rawContent);
@@ -122,10 +129,11 @@ export class QwenAdapter {
         );
       });
     } catch (e) {
+      console.error(`\nФАТАЛЬНО: JSON.parse провалился даже после очистки!`);
       console.error(
-        `\nФАТАЛЬНО: JSON.parse провалился даже с generation_config!`
+        `Первые 1000 символов очищенного:`,
+        rawContent.substring(0, 1000)
       );
-      console.error(`Первые 1000 символов очищенного:`, rawContent.substring(0, 1000));
       throw new Error(`Gemini вернул невалидный JSON: ${e.message}`);
     }
 
