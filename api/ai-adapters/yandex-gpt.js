@@ -13,7 +13,7 @@ export class YandexGPTAdapter {
 
     const requestBody = {
       modelUri: this.modelUri,
-      completionOptions: { temperature: 0.1, maxTokens: 16000 },
+      completionOptions: { temperature: 0.3, maxTokens: 7000 },
       messages: [
         {
           role: "system",
