@@ -26,14 +26,14 @@ export class QwenAdapter {
     };
 
     const requestBody = {
-      model: this.modelUri, // ← model, а не modelUri
-      temperature: 0.5,
+      model: "gemini-2.5-pro",
+      temperature: 0.2,
       max_tokens: 32000,
       response_format: {
         type: "json_schema",
         json_schema: {
           name: "file_operations",
-          strict: true, // ← ЭТО КЛЮЧЕВОЕ: модель не посмеет выебнуться
+          strict: true,
           schema: jsonSchema,
         },
       },
@@ -62,17 +62,14 @@ export class QwenAdapter {
     console.log(`   Body (полный):`);
     console.log(JSON.stringify(requestBody, null, 2));
 
-    const response = await fetch(
-      "https://llm.api.cloud.yandex.net/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Api-Key ${process.env.YANDEX_API_KEY}`,
-        },
-        body: JSON.stringify(requestBody),
-      }
-    );
+    const response = await fetch("https://neuroapi.host/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.NEURO_API_KEY}`,
+      },
+      body: JSON.stringify(requestBody),
+    });
 
     if (!response.ok) {
       const err = await response.text();
