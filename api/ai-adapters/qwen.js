@@ -1,7 +1,7 @@
 export class QwenAdapter {
   constructor() {
     this.name = "qwen";
-    this.modelUri = "claude-sonnet-4-5-20250929-thinking";
+    this.modelUri = "gemini-3-pro-preview-thinking";
   }
 
   async generateCode(prompt) {
