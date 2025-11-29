@@ -1,11 +1,11 @@
-export class YandexGPTAdapter {
+export class QWENAdapter {
   constructor() {
     this.name = "yandex-gpt";
-    this.modelUri = `gpt://${process.env.YANDEX_FOLDER_ID}/yandexgpt/rc`;
+    this.modelUri = `gpt://${process.env.YANDEX_FOLDER_ID}/QWEN/rc`;
   }
 
   async generateCode(prompt) {
-    console.log(`🚀 YANDEX GPT → Запуск модели: ${this.modelUri}`);
+    console.log(`🚀 QWEN → Запуск модели: ${this.modelUri}`);
     console.log(`📤 ПРОМПТ (полный, без обрезки):`);
     console.log(`──────────────────────────────────────────────────`);
     console.log(prompt);
@@ -34,7 +34,7 @@ export class YandexGPTAdapter {
     console.log(`   Headers: Authorization: Api-Key *** (скрыто)`);
     console.log(`   Body (полный):`);
     console.log(JSON.stringify(requestBody, null, 2));
-    console.log(`\n⏳ Ждём ответа от YandexGPT...\n`);
+    console.log(`\n⏳ Ждём ответа от QWEN...\n`);
 
     const response = await fetch(
       "https://llm.api.cloud.yandex.net/foundationModels/v1/completion",
@@ -51,9 +51,9 @@ export class YandexGPTAdapter {
     if (!response.ok) {
       const err = await response.text();
       console.error(
-        `❌ YANDEX ERROR ${response.status}: ${err.substring(0, 500)}`
+        `❌ QWEN ERROR ${response.status}: ${err.substring(0, 500)}`
       );
-      throw new Error(`YandexGPT: ${response.status} ${err}`);
+      throw new Error(`QWEN: ${response.status} ${err}`);
     }
 
     const data = await response.json();
@@ -61,10 +61,10 @@ export class YandexGPTAdapter {
 
     if (!rawText) {
       console.error(
-        `⚠️ ПУСТОЙ ОТВЕТ от YandexGPT! data:`,
+        `⚠️ ПУСТОЙ ОТВЕТ от QWEN! data:`,
         JSON.stringify(data, null, 2)
       );
-      throw new Error("Пустой ответ от YandexGPT");
+      throw new Error("Пустой ответ от QWEN");
     }
 
     console.log(`✅ ОТВЕТ ПОЛУЧЕН! Длина rawText: ${rawText.length} символов`);
@@ -141,11 +141,11 @@ export class YandexGPTAdapter {
         `Проблемный JSON (первые 1000):`,
         jsonStr.substring(0, 1000)
       );
-      throw new Error(`YandexGPT вернул невалидный JSON: ${e.message}`);
+      throw new Error(`QWEN вернул невалидный JSON: ${e.message}`);
     }
 
     if (!Array.isArray(parsed) || parsed.length === 0) {
-      throw new Error("YandexGPT вернул пустой или не массив");
+      throw new Error("QWEN вернул пустой или не массив");
     }
 
     console.log(`🎊 УСПЕХ! Получено ${parsed.length} файловых операций:`);
