@@ -1,14 +1,15 @@
+// ai-adapters/qwen.js (теперь для NeuroAPI/Gemini)
 export class QwenAdapter {
   constructor() {
-    this.name = "qwen";
-    this.modelUri = `gpt://${process.env.YANDEX_FOLDER_ID}/qwen3-235b-a22b-fp8/latest`;
+    this.name = "qwen"; // Можно переименовать в "gemini", но ладно
+    this.modelUri = "gemini-2.5-pro"; // Только имя модели для Gemini
   }
 
   async generateCode(prompt) {
-    console.log(`QWEN → /chat/completions (OpenAI-совместимый)`);
+    console.log(`GEMINI (NeuroAPI) → /v1/chat/completions`);
     console.log(`   Модель: ${this.modelUri}`);
 
-    // Твоя схема — копия из настроек Yandex Cloud
+    // Упрощённая схема для Gemini (без enum — они ломают protobuf; промпт компенсирует)
     const jsonSchema = {
       type: "array",
       minItems: 1,
@@ -19,23 +20,20 @@ export class QwenAdapter {
         additionalProperties: false,
         properties: {
           path: { type: "string" },
-          action: { type: "string", enum: ["create", "update", "delete"] },
-          content: { type: ["string", "null"] },
+          action: { type: "string" }, // Без enum — укажем в промпте: "create", "update", "delete"
+          content: { type: "string" }, // Убрал "null" — Gemini не любит unions; используй "" для пустого
         },
       },
     };
 
     const requestBody = {
-      model: "gemini-2.5-pro",
+      model: this.modelUri,
       temperature: 0.2,
-      max_tokens: 32000,
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "file_operations",
-          strict: true,
-          schema: jsonSchema,
-        },
+      max_tokens: 32000, // Gemini держит до 32K
+      // Gemini-формат: generation_config для JSON output
+      generation_config: {
+        response_mime_type: "application/json", // Принуждает JSON
+        response_schema: jsonSchema, // Твоя схема здесь
       },
       messages: [
         {
@@ -46,8 +44,9 @@ export class QwenAdapter {
 1. Отвечай ИСКЛЮЧИТЕЛЬНО валидным JSON, соответствующим схеме. Никакого текста до, после или внутри JSON быть не должно.
 2. Не пиши объяснения, не пиши комментарии, не используй markdown.
 3. Если нужно создать/обновить файл — указывай точный относительный путь без начального слеша.
-4. В поле content используй \n для переноса строки и экранируй обратные слеши, кавычки и другие спецсимволы, если они есть в коде.
-5. Если ничего делать не нужно — возвращай пустой массив [].`,
+4. В поле content используй \\n для переноса строки и экранируй обратные слеши, кавычки и другие спецсимволы, если они есть в коде. Если контент пустой — используй пустую строку "".
+5. action может быть только: "create", "update" или "delete".
+6. Если ничего делать не нужно — возвращай пустой массив [].`,
         },
         { role: "user", content: prompt },
       ],
@@ -58,7 +57,7 @@ export class QwenAdapter {
     console.log(prompt);
     console.log("═".repeat(80));
 
-    console.log(`\nОТПРАВЛЯЕМ ЗАПРОС на /chat/completions...`);
+    console.log(`\nОТПРАВЛЯЕМ ЗАПРОС на /v1/chat/completions...`);
     console.log(`   Body (полный):`);
     console.log(JSON.stringify(requestBody, null, 2));
 
@@ -74,16 +73,16 @@ export class QwenAdapter {
     if (!response.ok) {
       const err = await response.text();
       console.error(
-        `\nYANDEX ERROR ${response.status}: ${err.substring(0, 500)}`
+        `\nNEUROAPI ERROR ${response.status}: ${err.substring(0, 500)}` // Исправил на NEUROAPI для ясности
       );
-      throw new Error(`YandexGPT: ${response.status} ${err}`);
+      throw new Error(`NeuroAPI/Gemini: ${response.status} ${err}`);
     }
 
     const data = await response.json();
     const rawContent = data.choices?.[0]?.message?.content?.trim() || "";
 
     if (!rawContent) {
-      console.error("Пустой content от YandexGPT!");
+      console.error("Пустой content от Gemini!");
       throw new Error("Пустой ответ");
     }
 
@@ -125,10 +124,10 @@ export class QwenAdapter {
       });
     } catch (e) {
       console.error(
-        `\nФАТАЛЬНО: JSON.parse провалился даже с response_format!`
+        `\nФАТАЛЬНО: JSON.parse провалился даже с generation_config!`
       );
       console.error(`Первые 1000 символов:`, rawContent.substring(0, 1000));
-      throw new Error(`YandexGPT вернул невалидный JSON: ${e.message}`);
+      throw new Error(`Gemini вернул невалидный JSON: ${e.message}`);
     }
 
     if (!Array.isArray(parsed) || parsed.length === 0) {
