@@ -6,225 +6,199 @@ const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
 const ORG = "ljudidela";
 const GITHUB_BASE = `https://github.com/${ORG}`;
 
-// Глобальная Map для дедупликации (переживает вызовы функций)
-const processedCards = new Map();
+// Глобальное хранилище: карта "cardId → timestamp"
+const processing = new Map(); // активная обработка
+const recentlyProcessed = new Map(); // дедупликация после успеха/ошибки
+
+const DEBOUNCE_MS = 20_000; // 20 секунд — больше чем достаточно для всех правок описания
 
 export default async function handler(req, res) {
-  // Убрать отсюда: const processedCards = new Map();
-
-  // Очистка старых записей
-  for (const [key, timestamp] of processedCards.entries()) {
-    if (Date.now() - timestamp > 5 * 60 * 1000) {
-      // 5 минут
-      processedCards.delete(key);
-    }
-  }
-
   if (req.method === "HEAD" || req.method === "GET") {
-    return res.status(200).send("ok");
+    return res.status(200).send("Trello webhook alive");
   }
   if (req.method !== "POST") return res.status(405).end();
 
-  const body = await raw(req);
-  const payload = JSON.parse(body.toString());
+  let payload;
+  try {
+    const body = await raw(req);
+    payload = JSON.parse(body.toString("utf-8"));
+  } catch (e) {
+    return res.status(400).end("Invalid JSON");
+  }
 
   const actionType = payload.action?.type;
   if (!["createCard", "updateCard"].includes(actionType)) {
     return res.status(200).end();
   }
+
+  // Обрабатываем только изменение описания
   if (actionType === "updateCard") {
     const changed = Object.keys(payload.action?.data?.old || {});
     if (!changed.includes("desc")) return res.status(200).end();
   }
 
-  const card = payload.action.data.card;
-  const cardName = card.name?.trim();
-  const cardDescRaw = (card.desc || "").trim();
-  const cardId = card.id;
+  const cardId = payload.action.data.card.id;
+  const cardName = payload.action.data.card.name?.trim();
+  const cardDesc = (payload.action.data.card.desc || "").trim();
 
-  // Разные ключи для разных типов действий
-  const cardKey = `${cardId}_${actionType}`;
-
-  console.log(`Action type: ${actionType}, Card: ${cardId}, Key: ${cardKey}`);
-  console.log(
-    `Текущие обработанные карточки:`,
-    Array.from(processedCards.keys())
-  );
-
-  if (processedCards.has(cardKey)) {
-    console.log(`❌ Карточка ${cardId} уже обрабатывается, пропускаем`);
+  if (!cardId || !cardName || !cardDesc) {
     return res.status(200).end();
   }
-  console.log(`✅ Начинаем обработку карточки ${cardId}`);
-  processedCards.set(cardKey, Date.now());
 
-  if (!cardName || !cardId || !cardDescRaw) return res.status(200).end();
+  const now = Date.now();
 
-  const cardDesc = cardDescRaw;
-
-  let boardName =
-    payload.action?.data?.board?.name || payload.model?.name || "ai-board";
-  try {
-    if (!boardName) {
-      const boardRes = await fetch(
-        `https://api.trello.com/1/cards/${cardId}/board?key=${process.env.TRELLO_KEY}&token=${process.env.TRELLO_TOKEN}`
-      );
-      if (boardRes.ok) boardName = (await boardRes.json()).name;
-    }
-  } catch (e) {
-    console.error("Ошибка получения доски:", e.message);
+  // 1. Если уже идёт обработка — игнорируем
+  if (processing.has(cardId)) {
+    console.log(`ДУБЛЬ: карточка ${cardId} уже обрабатывается — пропускаем`);
+    return res.status(200).json({ status: "already_processing" });
   }
-  boardName = boardName.trim() || "ai-board";
 
-  const repoName =
-    boardName
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .replace(/-+/g, "-") || "ai-project";
-  const finalRepoName = repoName;
+  // 2. Если недавно обрабатывали (успешно или с ошибкой) — тоже пропускаем
+  if (recentlyProcessed.has(cardId)) {
+    const last = recentlyProcessed.get(cardId);
+    if (now - last < DEBOUNCE_MS) {
+      console.log(
+        `ДЕБАУНС: карточка ${cardId} обработана ${Math.round(
+          (now - last) / 1000
+        )}с назад`
+      );
+      return res.status(200).json({ status: "debounced" });
+    }
+  }
+
+  // Ставим флаг активной обработки
+  processing.set(cardId, now);
+  console.log(`НАЧИНАЕМ обработку карточки: ${cardId} (${cardName})`);
 
   let repoInfo;
   let existingRepoContext = "";
+  let finalRepoName;
 
   try {
-    repoInfo = await octokit.repos.get({ owner: ORG, repo: finalRepoName });
+    // === Получаем имя репо из доски ===
+    let boardName =
+      payload.action?.data?.board?.name || payload.model?.name || "ai-board";
+    if (!boardName) {
+      try {
+        const boardRes = await fetch(
+          `https://api.trello.com/1/cards/${cardId}/board?key=${process.env.TRELLO_KEY}&token=${process.env.TRELLO_TOKEN}`
+        );
+        if (boardRes.ok) boardName = (await boardRes.json()).name;
+      } catch (_) {}
+    }
+    boardName = boardName.trim() || "ai-board";
+
+    finalRepoName =
+      boardName
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/(^-+|-+$)/g, "")
+        .replace(/-+/g, "-") || "ai-project";
+
+    // === Читаем репо или создаём новое ===
+    try {
+      repoInfo = await octokit.repos.get({ owner: ORG, repo: finalRepoName });
+      const branch = repoInfo.data.default_branch || "main";
+
+      const { data: tree } = await octokit.git.getTree({
+        owner: ORG,
+        repo: finalRepoName,
+        tree_sha: branch,
+        recursive: true,
+      });
+
+      const filesList = tree.tree
+        .filter((f) => f.type === "blob")
+        .map((f) => f.path)
+        .slice(0, 100);
+
+      const important = [
+        "README.md",
+        "package.json",
+        "tsconfig.json",
+        "vite.config.ts",
+        "vite.config.js",
+        "src/app/page.tsx",
+        "src/app/layout.tsx",
+      ];
+
+      const existingFiles = {};
+      for (const path of important) {
+        if (!filesList.includes(path)) continue;
+        try {
+          const { data } = await octokit.repos.getContent({
+            owner: ORG,
+            repo: finalRepoName,
+            path,
+            ref: branch,
+          });
+          existingFiles[path] = Buffer.from(data.content, "base64").toString(
+            "utf-8"
+          );
+        } catch (_) {}
+      }
+
+      existingRepoContext = `\n\n=== СУЩЕСТВУЮЩИЙ ПРОЕКТ ===\n\n`;
+      for (const [p, c] of Object.entries(existingFiles)) {
+        existingRepoContext += `--- ${p} ---\n${c}\n\n`;
+      }
+      existingRepoContext += `Структура (до 100 файлов):\n${filesList.join(
+        "\n"
+      )}\n`;
+      existingRepoContext += `\nВАЖНО: используй "update" для существующих файлов, не создавай дубли.\n`;
+    } catch (e) {
+      if (e.status !== 404) throw e;
+      existingRepoContext = `\n\n=== НОВЫЙ ПРОЕКТ ===\nСоздай всё с нуля по лучшим практикам.\n`;
+    }
+
+    // Создаём репо, если не существует
+    if (!repoInfo) {
+      await octokit.repos.createInOrg({
+        org: ORG,
+        name: finalRepoName,
+        private: true,
+        auto_init: true,
+      });
+      repoInfo = await octokit.repos.get({ owner: ORG, repo: finalRepoName });
+    }
+
     const targetBranch = repoInfo.data.default_branch || "main";
 
-    // === ЧИТАЕМ ВСЁ ПОДРЯД, НЕ ТОЛЬКО КОРЕНЬ ===
-    const { data: tree } = await octokit.git.getTree({
-      owner: ORG,
-      repo: finalRepoName,
-      tree_sha: targetBranch,
-      recursive: true,
-    });
+    // === Формируем промпт и вызываем AI ===
+    const prompt = `ТЫ — senior full-stack инженер. Отвечай ТОЛЬКО чистым JSON-массивом.
 
-    const filesList = tree.tree
-      .filter((item) => item.type === "blob")
-      .map((item) => item.path)
-      .slice(0, 100); // ограничиваем, чтобы не перегрузить промпт
+ЖЁСТКИЕ ПРАВИЛА:
+1. index.html — всегда в корне
+2. package.json — всегда есть и рабочий
+3. README.md — с точной командой запуска
+4. Никаких /public, дубликатов, заглушек
+5. Проект запускается через "npm install && npm run dev" без ошибок
 
-    // Читаем содержимое важных файлов (включая из src/)
-    const importantPaths = [
-      "README.md",
-      "package.json",
-      "tsconfig.json",
-      "vite.config.ts",
-      "vite.config.js",
-      "src/app/page.tsx",
-      "src/app/layout.tsx",
-      "src/components/ui/button.tsx",
-    ];
+${existingRepoContext}
 
-    const existingFiles = {};
-    for (const path of importantPaths) {
-      if (!filesList.includes(path)) continue;
-      try {
-        const { data } = await octokit.repos.getContent({
-          owner: ORG,
-          repo: finalRepoName,
-          path,
-          ref: targetBranch,
-        });
-        if (data.content) {
-          const decoded = Buffer.from(data.content, "base64").toString("utf-8");
-          existingFiles[path] = decoded;
-        }
-      } catch (_) {
-        /* не найден — ок */
-      }
-    }
+ЗАДАЧА:
+${cardDesc}
 
-    existingRepoContext = `\n\n=== СУЩЕСТВУЮЩИЙ ПРОЕКТ ===\n\n`;
-    for (const [path, content] of Object.entries(existingFiles)) {
-      existingRepoContext += `--- ${path} ---\n${content}\n\n`;
-    }
+Отвечай ТОЛЬКО JSON-массивом операций.`;
 
-    existingRepoContext += `Полная структура проекта (до 100 файлов):\n${filesList.join(
-      "\n"
-    )}\n\n`;
-    existingRepoContext += `ВАЖНО:
-- Это НЕ новый проект, всегда используй action: "update" для существующих файлов.
-- Не создавай дубликаты в корне.
-- Не переписывай весь проект заново, если не просят.\n`;
-  } catch (e) {
-    if (e.status === 404) {
-      existingRepoContext =
-        "\n\n=== НОВЫЙ ПРОЕКТ ===\n" +
-        "Это полностью новый проект. Необходимо:\n" +
-        "- Создать правильную структуру проекта (src/, public/, components/ и т.д.)\n" +
-        "- Настроить package.json с необходимыми зависимостями\n" +
-        "- Создать index.html, проследить чтобы он были В КОРНЕ проекта а не /public\n" +
-        "- папку /public НЕ ИСПОЛЬЗОВАТЬ\n" +
-        "- Настроить сборщик (Vite, Webpack) и конфигурационные файлы\n" +
-        "- Продумать архитектуру приложения в соответствии с задачей\n" +
-        "- Убедиться, что проект собирается и запускается без ошибок\n" +
-        "- Добавить все необходимые скрипты в package.json (dev, build, start)\n";
-    } else {
-      console.error("Ошибка чтения репо:", e.status, e.message);
-      throw e;
-    }
-  }
-
-  // Создаём репо если нет
-  if (!repoInfo) {
-    await octokit.repos.createInOrg({
-      org: ORG,
-      name: finalRepoName,
-      private: true,
-      auto_init: true,
-    });
-    repoInfo = await octokit.repos.get({ owner: ORG, repo: finalRepoName });
-  }
-
-  const targetBranch = repoInfo.data.default_branch || "main";
-
-  try {
-    const prompt = `ТЫ — идеальный senior full-stack инженер с 20-летним опытом.
-      Ты НИКОГДА не нарушаешь жёсткие правила ниже.
-
-      ЖЁСТКИЕ ПРАВИЛА (ОБЯЗАТЕЛЬНЫ ДЛЯ ЛЮБОГО ПРОЕКТА):
-      1. index.html — всегда в корне проекта (НИКОГДА в /public, /src, /dist)
-      2. package.json — всегда есть и содержит корректные скрипты запуска
-      3. README.md — всегда есть, с точной командой запуска (npm run dev / yarn dev / pnpm dev)
-      4. Проект должен запускаться командой "npm install && npm run dev" без ошибок и без ручного перемещения файлов
-      5. Никаких дубликатов файлов
-      6. Никаких "примеров" и "заглушек", которые потом нужно удалять
-      7. Если используешь TypeScript — tsconfig.json должен быть корректным
-      8. Все пути в коде — относительные или правильные (никаких /src в импортах, если это не алиас)
-
-      Ты сам определяешь, какой стек нужен по описанию задачи.
-      Если пользователь явно сказал "React + Vite + Tailwind" — используй лучшие практики этого стека.
-      Если сказал "Vue 3 + Nuxt" — другие.
-      Если не сказал — выбирай самый современный и логичный.
-
-      ${existingRepoContext}
-
-      ЗАДАЧА ПОЛЬЗОВАТЕЛЯ:
-      ${cardDesc}
-
-      Отвечай ТОЛЬКО чистым JSON-массивом. Никакого текста вне JSON.`;
-    const AI_PROVIDER = process.env.AI_PROVIDER || "qwen";
-    const aiAdapter = getAdapter(AI_PROVIDER);
-
+    const aiAdapter = getAdapter(process.env.AI_PROVIDER || "qwen");
     const fileOps = await aiAdapter.generateCode(prompt);
 
     if (!Array.isArray(fileOps) || fileOps.length === 0) {
-      throw new Error("AI вернул пустой или некорректный ответ");
+      throw new Error("AI вернул пустой ответ");
     }
 
     const results = { success: [], failed: [] };
 
     for (const op of fileOps) {
-      if (!op?.path || !op?.action) continue;
-
+      if (!op?.path || !op.action) continue;
       const action = op.action.toLowerCase();
       const path = op.path.replace(/^\/+/, "");
 
       if (!["create", "update", "delete"].includes(action)) continue;
 
       try {
-        let existingSha;
+        let sha;
         try {
           const { data } = await octokit.repos.getContent({
             owner: ORG,
@@ -232,52 +206,49 @@ export default async function handler(req, res) {
             path,
             ref: targetBranch,
           });
-          existingSha = data.sha;
+          sha = data.sha;
         } catch (e) {
-          if (e.status !== 404)
-            console.error("Ошибка получения SHA:", e.message);
+          if (e.status !== 404) console.error("SHA error:", e.message);
         }
 
         if (action === "delete") {
-          if (!existingSha) continue;
+          if (!sha) continue;
           await octokit.repos.deleteFile({
             owner: ORG,
             repo: finalRepoName,
             path,
-            message: `AI delete ${path} — ${cardName}`,
-            sha: existingSha,
+            message: `AI: delete ${path} — ${cardName}`,
+            sha,
             branch: targetBranch,
           });
-          results.success.push({ path, action });
-          continue;
+        } else {
+          let content = op.content ?? "";
+          if (typeof content === "string") {
+            content = content
+              .replace(/\\n/g, "\n")
+              .replace(/\\t/g, "\t")
+              .replace(/\\"/g, '"')
+              .replace(/\\\\/g, "\\");
+          }
+
+          await octokit.repos.createOrUpdateFileContents({
+            owner: ORG,
+            repo: finalRepoName,
+            path,
+            message: `AI: ${action} ${path} — ${cardName}`,
+            content: Buffer.from(content).toString("base64"),
+            branch: targetBranch,
+            sha,
+          });
         }
-
-        let content = typeof op.content === "string" ? op.content : "";
-        if (/\\[ntr"\\]/.test(content) && !content.includes("\n")) {
-          content = content
-            .replace(/\\n/g, "\n")
-            .replace(/\\t/g, "\t")
-            .replace(/\\"/g, '"')
-            .replace(/\\\\/g, "\\");
-        }
-
-        await octokit.repos.createOrUpdateFileContents({
-          owner: ORG,
-          repo: finalRepoName,
-          path,
-          message: `AI ${action} ${path} — ${cardName}`,
-          content: Buffer.from(content).toString("base64"),
-          branch: targetBranch,
-          sha: existingSha,
-        });
-
         results.success.push({ path, action });
       } catch (err) {
         results.failed.push({ path, error: err.message });
+        console.error(`Ошибка ${action} ${path}:`, err.message);
       }
     }
 
-    // После успешного завершения всех операций
+    // === Успешно завершено ===
     const repoUrl = `${GITHUB_BASE}/${finalRepoName}`;
     const comment = `Репозиторий обновлён\n${repoUrl}\n\nУспешно: ${results.success.length}\nОшибок: ${results.failed.length}`;
 
@@ -288,31 +259,35 @@ export default async function handler(req, res) {
       { method: "POST" }
     ).catch(() => {});
 
-    // ✅ Снимаем блокировку ПОСЛЕ успешного завершения
-    processedCards.delete(cardKey);
+    // Снимаем блокировку и ставим дедупликацию
+    processing.delete(cardId);
+    recentlyProcessed.set(cardId, now);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       repo: repoUrl,
-      filesProcessed: results.success.length,
-      filesFailed: results.failed.length,
+      files: results.success.length,
     });
   } catch (err) {
-    console.error("Критическая ошибка:", err);
+    console.error("КРИТИЧЕСКАЯ ОШИБКА:", err);
 
-    // ❌ Снимаем блокировку при ошибке
-    processedCards.delete(cardKey);
+    // Снимаем активную блокировку, но оставляем дедупликацию
+    processing.delete(cardId);
+    recentlyProcessed.set(cardId, now);
 
     await fetch(
       `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${
         process.env.TRELLO_KEY
       }&token=${process.env.TRELLO_TOKEN}&text=${encodeURIComponent(
-        "Ошибка: " + err.message.slice(0, 500)
+        "Ошибка AI: " + err.message.slice(0, 400)
       )}`,
       { method: "POST" }
     ).catch(() => {});
-    res.status(500).json({ error: err.message });
+
+    return res.status(500).json({ error: err.message });
   }
 }
 
-export const config = { api: { bodyParser: false } };
+export const config = {
+  api: { bodyParser: false },
+};
