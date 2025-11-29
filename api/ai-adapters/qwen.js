@@ -1,7 +1,7 @@
 export class QwenAdapter {
   constructor() {
     this.name = "qwen";
-    this.modelUri = `gpt://${process.env.YANDEX_FOLDER_ID}/yandexgpt/rc`;
+    this.modelUri = `gpt://${process.env.YANDEX_FOLDER_ID}/yandexgpt/latest`;
   }
 
   async generateCode(prompt) {
