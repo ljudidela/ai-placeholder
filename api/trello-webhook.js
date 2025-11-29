@@ -180,41 +180,59 @@ export default async function handler(req, res) {
   const targetBranch = repoInfo.data.default_branch || "main";
 
   try {
-    const prompt = `ТЫ — идеальный senior full-stack разработчик, который НИКОГДА не забывает базовые вещи и следует чек-листу ниже.
+    const prompt = `ТЫ — идеальный senior full-stack инженер с 20-летним опытом.
+      Ты НИКОГДА не нарушаешь жёсткие правила ниже.
 
-      КЛЮЧЕВОЙ ЧЕК-ЛИСТ (обязателен для любого проекта, если не сказано обратное):
-      1. index.html всегда в КОРНЕ проекта, НЕ в /public
-      2. public/ папки НЕТ вообще (Vite её не требует)
-      3. package.json всегда есть и содержит:
-        - правильные зависимости (react, react-dom, typescript или @types если TS, выбранная библиотека графиков и т.д.)
-        - скрипты "dev", "build", "preview" (для Vite) или "start" если CRA
-        - "type": "module" если ESM
-      4. README.md всегда создаётся/обновляется с точными инструкциями запуска
-      5. Темная тема по умолчанию (bg-gray-900, text-white и т.д. или Tailwind dark:)
-      6. Tailwind CSS или ShadCN/ui — если используется UI-библиотека
-      7. Все стили/тема применены глобально
-      8. Никаких дубликатов файлов, никаких лишних файлов в корне
-      9. Проект запускается командой npm install && npm run dev без ошибок
+      ЖЁСТКИЕ ПРАВИЛА (ОБЯЗАТЕЛЬНЫ ДЛЯ ЛЮБОГО ПРОЕКТА):
+      1. index.html — всегда в корне проекта (НИКОГДА в /public, /src, /dist)
+      2. package.json — всегда есть и содержит корректные скрипты запуска
+      3. README.md — всегда есть, с точной командой запуска (npm run dev / yarn dev / pnpm dev)
+      4. Проект должен запускаться командой "npm install && npm run dev" без ошибок и без ручного перемещения файлов
+      5. Никаких дубликатов файлов
+      6. Никаких "примеров" и "заглушек", которые потом нужно удалять
+      7. Если используешь TypeScript — tsconfig.json должен быть корректным
+      8. Все пути в коде — относительные или правильные (никаких /src в импортах, если это не алиас)
+
+      СТЕК-ЗАВИСИМЫЕ ПРАВИЛА (применяй ТОЛЬКО если задача явно или неявно требует этот стек):
+
+      → VITE + REACT + TAILWIND:
+        • "type": "module" — ЗАПРЕЩЕНО в package.json
+        • tailwind.config.js и postcss.config.js — всегда через module.exports = { ... }
+        • vite.config.ts — через export default defineConfig(...)
+        • @tailwind directives в src/index.css или App.css
+
+      → VITE + VUE:
+        • "type": "module" — разрешено
+        • vite.config.ts — ESM
+        • main.js/ts — может быть ESM
+
+      → NEXT.JS:
+        • next.config.mjs или .js — в зависимости от "type": "module"
+        • app/ или pages/
+        • tailwind.config.ts — ESM
+
+      → WEBPACK:
+        • webpack.config.js — всегда CommonJS (module.exports)
+        • postcss.config.js — CommonJS
+
+      → NUXT:
+        • nuxt.config.ts — ESM
+
+      → SVELTE / SVELTEKIT:
+        • svelte.config.js — CommonJS
+        • vite.config.js — ESM (если Vite)
+
+      Ты сам определяешь, какой стек нужен по описанию задачи.
+      Если пользователь явно сказал "React + Vite + Tailwind" — используй правила для этого стека.
+      Если сказал "Vue 3 + Nuxt" — другие.
+      Если не сказал — выбирай самый современный и логичный.
 
       ${existingRepoContext}
 
-      ЗАДАНИЕ ПОЛЬЗОВАТЕЛЯ:
+      ЗАДАЧА ПОЛЬЗОВАТЕЛЯ:
       ${cardDesc}
 
-      ПРАВИЛА ОТВЕТА:
-      - Отвечай ИСКЛЮЧИТЕЛЬНО валидным JSON-массивом по схеме ниже.
-      - НИКАКОГО текста вне JSON, даже пробелов до [
-      - Если файл уже существует и правильный — не трогай его (но если он сломан — чини)
-      - Для новых проектов всегда создавай минимум: package.json, vite.config.ts, index.html (в корне), src/main.tsx, src/App.tsx, README.md
-      - Всегда указывай реальные зависимости в package.json (например "recharts", "lucide-react", "@chart-js" и т.д.)
-
-      Формат ответа:
-      [
-        {"path": "package.json", "action": "create", "content": "{...}"},
-        {"path": "index.html", "action": "create", "content": "<!DOCTYPE html>...</html>"},
-        ...
-      ]`;
-
+      Отвечай ТОЛЬКО чистым JSON-массивом. Никакого текста вне JSON.`;
     const AI_PROVIDER = process.env.AI_PROVIDER || "qwen";
     const aiAdapter = getAdapter(AI_PROVIDER);
 
