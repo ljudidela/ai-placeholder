@@ -4,13 +4,21 @@ export class QwenAdapter {
   constructor() {
     this.name = "qwen";
     this.modelUri = `gpt://${process.env.YANDEX_FOLDER_ID}/qwen3-235b-a22b-fp8/latest`;
+
+    // Инициализируем клиент один раз — быстрее и чище
+    this.client = new OpenAI({
+      apiKey: process.env.YANDEX_API_KEY,
+      baseURL: "https://llm.api.cloud.yandex.net/v1",
+      defaultHeaders: {
+        "x-folder-id": process.env.YANDEX_FOLDER_ID,
+      },
+    });
   }
 
   async generateCode(prompt) {
     console.log(`QWEN → /chat/completions (OpenAI-совместимый)`);
     console.log(`   Модель: ${this.modelUri}`);
 
-    // Твоя схема — копия из настроек Yandex Cloud
     const jsonSchema = {
       type: "array",
       minItems: 1,
@@ -28,14 +36,14 @@ export class QwenAdapter {
     };
 
     const requestBody = {
-      model: this.modelUri, // ← model, а не modelUri
+      model: this.modelUri,
       temperature: 0.4,
-      max_tokens: 7000,
+      max_tokens: 16000,
       response_format: {
         type: "json_schema",
         json_schema: {
           name: "file_operations",
-          strict: true, // ← ЭТО КЛЮЧЕВОЕ: модель не посмеет выебнуться
+          strict: true,
           schema: jsonSchema,
         },
       },
@@ -48,7 +56,7 @@ export class QwenAdapter {
 1. Отвечай ИСКЛЮЧИТЕЛЬНО валидным JSON, соответствующим схеме. Никакого текста до, после или внутри JSON быть не должно.
 2. Не пиши объяснения, не пиши комментарии, не используй markdown.
 3. Если нужно создать/обновить файл — указывай точный относительный путь без начального слеша.
-4. В поле content используй \n для переноса строки и экранируй обратные слеши, кавычки и другие спецсимволы, если они есть в коде.
+4. В поле content используй \\n для переноса строки и экранируй обратные слеши, кавычки и другие спецсимволы, если они есть в коде.
 5. Если ничего делать не нужно — возвращай пустой массив [].`,
         },
         { role: "user", content: prompt },
@@ -64,31 +72,23 @@ export class QwenAdapter {
     console.log(`   Body (полный):`);
     console.log(JSON.stringify(requestBody, null, 2));
 
-    const openai = OpenAI(
-      (api_key = process.env.YANDEX_API_KEY),
-      (base_url = "https://llm.api.cloud.yandex.net/v1"),
-      (project = process.env.YANDEX_FOLDER_ID)
-    );
-
-    const response = await openai.chat.completions.create({
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Api-Key ${process.env.YANDEX_API_KEY}`,
-      },
-      body: JSON.stringify(requestBody),
-    });
-
-    if (!response.ok) {
-      const err = await response.text();
+    let completion;
+    try {
+      completion = await this.client.chat.completions.create(requestBody);
+    } catch (error) {
       console.error(
-        `\nYANDEX ERROR ${response.status}: ${err.substring(0, 500)}`
+        "\nYANDEX ERROR (OpenAI SDK):",
+        error.status,
+        error.message
       );
-      throw new Error(`YandexGPT: ${response.status} ${err}`);
+      if (error.response) {
+        const errText = await error.response.text();
+        console.error(errText.substring(0, 500));
+      }
+      throw new Error(`YandexGPT API error: ${error.message}`);
     }
 
-    const data = await response.json();
-    const rawContent = data.choices?.[0]?.message?.content?.trim() || "";
+    const rawContent = completion.choices?.[0]?.message?.content?.trim() || "";
 
     if (!rawContent) {
       console.error("Пустой content от YandexGPT!");
@@ -118,7 +118,6 @@ export class QwenAdapter {
     console.log(`   └─ КОНЕЦ ───────────────────────────────────────`);
     console.log(end);
 
-    // Чистый JSON — парсим без хаков
     let parsed;
     try {
       parsed = JSON.parse(rawContent);
