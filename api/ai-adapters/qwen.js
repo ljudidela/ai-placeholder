@@ -1,15 +1,14 @@
-// ai-adapters/qwen.js (теперь для NeuroAPI/Gemini)
 export class QwenAdapter {
   constructor() {
-    this.name = "qwen"; // Можно переименовать в "gemini", но ладно
-    this.modelUri = "gemini-2.5-pro"; // Только имя модели для Gemini
+    this.name = "qwen";
+    this.modelUri = "gemini-2.5-pro";
   }
 
   async generateCode(prompt) {
     console.log(`GEMINI (NeuroAPI) → /v1/chat/completions`);
     console.log(`   Модель: ${this.modelUri}`);
 
-    // Упрощённая схема для Gemini (без enum — они ломают protobuf; промпт компенсирует)
+    // Схема по докам Gemini 2025: type как array для null, без enum (в промпте)
     const jsonSchema = {
       type: "array",
       minItems: 1,
@@ -20,20 +19,19 @@ export class QwenAdapter {
         additionalProperties: false,
         properties: {
           path: { type: "string" },
-          action: { type: "string" }, // Без enum — укажем в промпте: "create", "update", "delete"
-          content: { type: "string" }, // Убрал "null" — Gemini не любит unions; используй "" для пустого
+          action: { type: "string" }, // Без enum — Gemini косячит на "not repeating"
+          content: { type: ["string", "null"] }, // Array для null, как в 
         },
       },
     };
 
     const requestBody = {
       model: this.modelUri,
-      temperature: 0.2,
-      max_tokens: 32000, // Gemini держит до 32K
-      // Gemini-формат: generation_config для JSON output
+      temperature: 0.1, // Понизил для стабильности (меньше креатива в MD)
+      max_tokens: 32000,
       generation_config: {
-        response_mime_type: "application/json", // Принуждает JSON
-        response_schema: jsonSchema, // Твоя схема здесь
+        response_mime_type: "application/json",
+        response_schema: jsonSchema,
       },
       messages: [
         {
@@ -41,12 +39,13 @@ export class QwenAdapter {
           content: `Ты — автономный агент-программист, который общается с внешним миром ТОЛЬКО через строго структурированный JSON по указанной ниже схеме. 
 
 Правила, которые ты обязан соблюдать без единого исключения:
-1. Отвечай ИСКЛЮЧИТЕЛЬНО валидным JSON, соответствующим схеме. Никакого текста до, после или внутри JSON быть не должно.
+1. Отвечай ИСКЛЮЧИТЕЛЬНО валидным JSON, соответствующим схеме. Никакого текста до, после или внутри JSON быть не должно. НЕ добавляй markdown, backticks (```json
 2. Не пиши объяснения, не пиши комментарии, не используй markdown.
 3. Если нужно создать/обновить файл — указывай точный относительный путь без начального слеша.
-4. В поле content используй \\n для переноса строки и экранируй обратные слеши, кавычки и другие спецсимволы, если они есть в коде. Если контент пустой — используй пустую строку "".
-5. action может быть только: "create", "update" или "delete".
-6. Если ничего делать не нужно — возвращай пустой массив [].`,
+4. В поле content используй \\n для переноса строки и экранируй обратные слеши, кавычки и другие спецсимволы, если они есть в коде. Если контент пустой — используй null.
+5. action может быть ТОЛЬКО: "create", "update" или "delete". НИКОГДА не используй другие значения.
+6. Если ничего делать не нужно — возвращай пустой массив [].
+7. В package.json НИКОГДА не ставь "type": "module" — это ломает проект. Всегда CommonJS по умолчанию.`,
         },
         { role: "user", content: prompt },
       ],
@@ -72,23 +71,23 @@ export class QwenAdapter {
 
     if (!response.ok) {
       const err = await response.text();
-      console.error(
-        `\nNEUROAPI ERROR ${response.status}: ${err.substring(0, 500)}` // Исправил на NEUROAPI для ясности
-      );
+      console.error(`\nNEUROAPI ERROR ${response.status}: ${err.substring(0, 500)}`);
       throw new Error(`NeuroAPI/Gemini: ${response.status} ${err}`);
     }
 
     const data = await response.json();
-    const rawContent = data.choices?.[0]?.message?.content?.trim() || "";
+    let rawContent = data.choices?.[0]?.message?.content?.trim() || "";
 
     if (!rawContent) {
       console.error("Пустой content от Gemini!");
       throw new Error("Пустой ответ");
     }
 
-    console.log(`\nОТВЕТ ПОЛУЧЕН! Длина: ${rawContent.length} символов`);
-    console.log(`RAW ОТВЕТ (начало + середина + конец):`);
+    // ФИКС: Очистка MD-обёртки (```json ... ```) — по примерам из 
+    rawContent = rawContent.replace(/^```json\s*\n?/, "").replace(/\n?```\s*$/, "").trim();
+    console.log(`\nОЧИЩЕННЫЙ RAW ОТВЕТ (после удаления MD): Длина: ${rawContent.length} символов`);
 
+    console.log(`ОЧИЩЕННЫЙ RAW (начало + середина + конец):`);
     const chunk = 600;
     const start = rawContent.substring(0, chunk);
     const middle =
@@ -126,7 +125,7 @@ export class QwenAdapter {
       console.error(
         `\nФАТАЛЬНО: JSON.parse провалился даже с generation_config!`
       );
-      console.error(`Первые 1000 символов:`, rawContent.substring(0, 1000));
+      console.error(`Первые 1000 символов очищенного:`, rawContent.substring(0, 1000));
       throw new Error(`Gemini вернул невалидный JSON: ${e.message}`);
     }
 
