@@ -180,21 +180,42 @@ export default async function handler(req, res) {
   const targetBranch = repoInfo.data.default_branch || "main";
 
   try {
-    const prompt = `Ты — senior full-stack разработчик с доступом ко всему проекту.
+    const prompt = `ТЫ — идеальный senior full-stack разработчик, который НИКОГДА не забывает базовые вещи и следует чек-листу ниже.
 
-${existingRepoContext}
+      КЛЮЧЕВОЙ ЧЕК-ЛИСТ (обязателен для любого проекта, если не сказано обратное):
+      1. index.html всегда в КОРНЕ проекта, НЕ в /public
+      2. public/ папки НЕТ вообще (Vite её не требует)
+      3. package.json всегда есть и содержит:
+        - правильные зависимости (react, react-dom, typescript или @types если TS, выбранная библиотека графиков и т.д.)
+        - скрипты "dev", "build", "preview" (для Vite) или "start" если CRA
+        - "type": "module" если ESM
+      4. README.md всегда создаётся/обновляется с точными инструкциями запуска
+      5. Темная тема по умолчанию (bg-gray-900, text-white и т.д. или Tailwind dark:)
+      6. Tailwind CSS или ShadCN/ui — если используется UI-библиотека
+      7. Все стили/тема применены глобально
+      8. Никаких дубликатов файлов, никаких лишних файлов в корне
+      9. Проект запускается командой npm install && npm run dev без ошибок
 
-ЗАДАЧА ОТ ПОЛЬЗОВАТЕЛЯ:
-${cardDesc}
+      ${existingRepoContext}
 
-ОТВЕЧАЙ ТОЛЬКО чистым JSON-массивом вида:
-[
-  {"path": "src/components/Chart.tsx", "action": "create", "content": "..."},
-  {"path": "src/app/page.tsx", "action": "update", "content": "..."}
-]
-Без markdown, без пояснений, только массив от [ до ].`;
+      ЗАДАНИЕ ПОЛЬЗОВАТЕЛЯ:
+      ${cardDesc}
 
-    const AI_PROVIDER = process.env.AI_PROVIDER || "yandex";
+      ПРАВИЛА ОТВЕТА:
+      - Отвечай ИСКЛЮЧИТЕЛЬНО валидным JSON-массивом по схеме ниже.
+      - НИКАКОГО текста вне JSON, даже пробелов до [
+      - Если файл уже существует и правильный — не трогай его (но если он сломан — чини)
+      - Для новых проектов всегда создавай минимум: package.json, vite.config.ts, index.html (в корне), src/main.tsx, src/App.tsx, README.md
+      - Всегда указывай реальные зависимости в package.json (например "recharts", "lucide-react", "@chart-js" и т.д.)
+
+      Формат ответа:
+      [
+        {"path": "package.json", "action": "create", "content": "{...}"},
+        {"path": "index.html", "action": "create", "content": "<!DOCTYPE html>...</html>"},
+        ...
+      ]`;
+
+    const AI_PROVIDER = process.env.AI_PROVIDER || "qwen";
     const aiAdapter = getAdapter(AI_PROVIDER);
 
     const fileOps = await aiAdapter.generateCode(prompt);
