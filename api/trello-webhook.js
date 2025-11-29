@@ -193,37 +193,8 @@ export default async function handler(req, res) {
       7. Если используешь TypeScript — tsconfig.json должен быть корректным
       8. Все пути в коде — относительные или правильные (никаких /src в импортах, если это не алиас)
 
-      СТЕК-ЗАВИСИМЫЕ ПРАВИЛА (применяй ТОЛЬКО если задача явно или неявно требует этот стек):
-
-      → VITE + REACT + TAILWIND:
-        • "type": "module" — ЗАПРЕЩЕНО в package.json
-        • tailwind.config.js и postcss.config.js — всегда через module.exports = { ... }
-        • vite.config.ts — через export default defineConfig(...)
-        • @tailwind directives в src/index.css или App.css
-
-      → VITE + VUE:
-        • "type": "module" — разрешено
-        • vite.config.ts — ESM
-        • main.js/ts — может быть ESM
-
-      → NEXT.JS:
-        • next.config.mjs или .js — в зависимости от "type": "module"
-        • app/ или pages/
-        • tailwind.config.ts — ESM
-
-      → WEBPACK:
-        • webpack.config.js — всегда CommonJS (module.exports)
-        • postcss.config.js — CommonJS
-
-      → NUXT:
-        • nuxt.config.ts — ESM
-
-      → SVELTE / SVELTEKIT:
-        • svelte.config.js — CommonJS
-        • vite.config.js — ESM (если Vite)
-
       Ты сам определяешь, какой стек нужен по описанию задачи.
-      Если пользователь явно сказал "React + Vite + Tailwind" — используй правила для этого стека.
+      Если пользователь явно сказал "React + Vite + Tailwind" — используй лучшие практики этого стека.
       Если сказал "Vue 3 + Nuxt" — другие.
       Если не сказал — выбирай самый современный и логичный.
 
