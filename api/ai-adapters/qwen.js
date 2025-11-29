@@ -27,7 +27,7 @@ export class QwenAdapter {
 
     const requestBody = {
       model: this.modelUri, // ← model, а не modelUri
-      temperature: 0.2,
+      temperature: 0.1,
       max_tokens: 7000,
       response_format: {
         type: "json_schema",
