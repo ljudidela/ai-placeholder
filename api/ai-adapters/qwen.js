@@ -1,3 +1,5 @@
+import OpenAI from "openai";
+
 export class QwenAdapter {
   constructor() {
     this.name = "qwen";
@@ -62,7 +64,13 @@ export class QwenAdapter {
     console.log(`   Body (полный):`);
     console.log(JSON.stringify(requestBody, null, 2));
 
-    const response = await fetch("https://llm.api.cloud.yandex.net/v1", {
+    const openai = OpenAI(
+      (api_key = process.env.YANDEX_API_KEY),
+      (base_url = "https://llm.api.cloud.yandex.net/v1"),
+      (project = process.env.YANDEX_FOLDER_ID)
+    );
+
+    const response = await openai.chat.completions.create({
       method: "POST",
       headers: {
         "Content-Type": "application/json",

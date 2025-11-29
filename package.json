@@ -5,6 +5,7 @@
   "dependencies": {
     "@octokit/rest": "^20.1.1",
     "node-fetch": "^3.3.2",
+    "openai": "^6.9.1",
     "raw-body": "^3.0.2"
   }
 }
