@@ -6,11 +6,11 @@ const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
 const ORG = "ljudidela";
 const GITHUB_BASE = `https://github.com/${ORG}`;
 
-// Глобальное хранилище: карта "cardId → timestamp"
-const processing = new Map(); // активная обработка
-const recentlyProcessed = new Map(); // дедупликация после успеха/ошибки
-
-const DEBOUNCE_MS = 20_000; // 20 секунд — больше чем достаточно для всех правок описания
+// ─────────────────────── НОВАЯ ЗАЩИТА ОТ ДУБЛЕЙ ───────────────────────
+// Две карты: активная обработка + дедупликация по точному тексту описания
+const activeProcessing = new Map(); // cardId → true
+const processedContent = new Map(); // `${cardId}_${hash(desc)}` → timestamp
+const DEBOUNCE_TTL = 30_000; // 30 секунд — больше чем надо
 
 export default async function handler(req, res) {
   if (req.method === "HEAD" || req.method === "GET") {
@@ -31,7 +31,6 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  // Обрабатываем только изменение описания
   if (actionType === "updateCard") {
     const changed = Object.keys(payload.action?.data?.old || {});
     if (!changed.includes("desc")) return res.status(200).end();
@@ -45,30 +44,28 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  const now = Date.now();
-
-  // 1. Если уже идёт обработка — игнорируем
-  if (processing.has(cardId)) {
-    console.log(`ДУБЛЬ: карточка ${cardId} уже обрабатывается — пропускаем`);
+  // ─────────────────────── ЗАЩИТА ОТ ДУБЛЕЙ ───────────────────────
+  // 1. Уже идёт обработка этой карточки
+  if (activeProcessing.has(cardId)) {
+    console.log(`ДУБЛЬ: карточка ${cardId} уже обрабатывается`);
     return res.status(200).json({ status: "already_processing" });
   }
 
-  // 2. Если недавно обрабатывали (успешно или с ошибкой) — тоже пропускаем
-  if (recentlyProcessed.has(cardId)) {
-    const last = recentlyProcessed.get(cardId);
-    if (now - last < DEBOUNCE_MS) {
+  // 2. Этот же самый текст уже был обработан недавно
+  const contentKey = `${cardId}_${cardDesc}`;
+  if (processedContent.has(contentKey)) {
+    const ago = Date.now() - processedContent.get(contentKey);
+    if (ago < DEBOUNCE_TTL) {
       console.log(
-        `ДЕБАУНС: карточка ${cardId} обработана ${Math.round(
-          (now - last) / 1000
-        )}с назад`
+        `ДЕДУП: тот же текст обработан ${Math.round(ago / 1000)}с назад`
       );
-      return res.status(200).json({ status: "debounced" });
+      return res.status(200).json({ status: "deduped_same_content" });
     }
   }
 
-  // Ставим флаг активной обработки
-  processing.set(cardId, now);
-  console.log(`НАЧИНАЕМ обработку карточки: ${cardId} (${cardName})`);
+  // Ставим флаг начала обработки
+  activeProcessing.set(cardId, true);
+  console.log(`СТАРТ обработки карточки ${cardId} («${cardName}»)`);
 
   let repoInfo;
   let existingRepoContext = "";
@@ -151,7 +148,6 @@ export default async function handler(req, res) {
       existingRepoContext = `\n\n=== НОВЫЙ ПРОЕКТ ===\nСоздай всё с нуля по лучшим практикам.\n`;
     }
 
-    // Создаём репо, если не существует
     if (!repoInfo) {
       await octokit.repos.createInOrg({
         org: ORG,
@@ -164,7 +160,6 @@ export default async function handler(req, res) {
 
     const targetBranch = repoInfo.data.default_branch || "main";
 
-    // === Формируем промпт и вызываем AI ===
     const prompt = `ТЫ — senior full-stack инженер. Отвечай ТОЛЬКО чистым JSON-массивом.
 
 ЖЁСТКИЕ ПРАВИЛА:
@@ -248,7 +243,6 @@ ${cardDesc}
       }
     }
 
-    // === Успешно завершено ===
     const repoUrl = `${GITHUB_BASE}/${finalRepoName}`;
     const comment = `Репозиторий обновлён\n${repoUrl}\n\nУспешно: ${results.success.length}\nОшибок: ${results.failed.length}`;
 
@@ -259,10 +253,6 @@ ${cardDesc}
       { method: "POST" }
     ).catch(() => {});
 
-    // Снимаем блокировку и ставим дедупликацию
-    processing.delete(cardId);
-    recentlyProcessed.set(cardId, now);
-
     return res.status(200).json({
       success: true,
       repo: repoUrl,
@@ -270,10 +260,6 @@ ${cardDesc}
     });
   } catch (err) {
     console.error("КРИТИЧЕСКАЯ ОШИБКА:", err);
-
-    // Снимаем активную блокировку, но оставляем дедупликацию
-    processing.delete(cardId);
-    recentlyProcessed.set(cardId, now);
 
     await fetch(
       `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${
@@ -285,6 +271,18 @@ ${cardDesc}
     ).catch(() => {});
 
     return res.status(500).json({ error: err.message });
+  } finally {
+    // ─────────────────────── СНЯТИЕ БЛОКИРОВОК ───────────────────────
+    activeProcessing.delete(cardId);
+    processedContent.set(`${cardId}_${cardDesc}`, Date.now());
+
+    // Чистим старые записи (чтобы мапа не росла вечно)
+    if (processedContent.size > 10_000) {
+      const cutoff = Date.now() - 3_600_000; // старше часа
+      for (const [key, ts] of processedContent.entries()) {
+        if (ts < cutoff) processedContent.delete(key);
+      }
+    }
   }
 }
 
