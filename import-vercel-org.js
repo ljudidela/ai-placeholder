@@ -1,3 +1,5 @@
+import { Octokit } from "@octokit/rest";
+
 const octokit = new Octokit({ auth: process.env.GH_PAT });
 const ORG = "ljudidela";
 
@@ -8,17 +10,19 @@ async function importAll() {
     if (repo.archived || repo.fork) continue;
 
     try {
-      // Проверяем, есть ли уже проект
+      // Проверяем, существует ли проект
       const check = await fetch(
         `https://api.vercel.com/v9/projects/${repo.name}`,
         {
-          headers: { Authorization: `Bearer ${process.env.VERCEL_TOKEN}` },
+          headers: {
+            Authorization: `Bearer ${process.env.VERCEL_TOKEN}`,
+          },
         }
       );
 
       if (check.status === 404) {
-        // Создаём новый проект
-        const create = await fetch("https://api.vercel.com/v9/projects", {
+        // Создаём проект
+        const res = await fetch("https://api.vercel.com/v9/projects", {
           method: "POST",
           headers: {
             Authorization: `Bearer ${process.env.VERCEL_TOKEN}`,
@@ -33,10 +37,13 @@ async function importAll() {
           }),
         });
 
-        if (create.ok) {
+        if (res.ok) {
           console.log(`Создан и задеплоен: ${repo.name}`);
         } else {
-          console.error(`Ошибка создания ${repo.name}:`, await create.text());
+          const text = await res.text();
+          console.error(
+            `Ошибка создания ${repo.name}: ${res.status} — ${text}`
+          );
         }
       } else {
         console.log(`Уже существует: ${repo.name}`);
@@ -45,9 +52,9 @@ async function importAll() {
       console.error(`Критическая ошибка с ${repo.name}:`, e.message);
     }
 
-    // Чтобы не словить rate-limit
-    await new Promise((r) => setTimeout(r, 1000));
+    // Пауза, чтобы не словить rate-limit Vercel
+    await new Promise((r) => setTimeout(r, 1200));
   }
 }
 
-importAll();
+importAll().catch(console.error);

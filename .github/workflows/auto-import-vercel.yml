@@ -2,7 +2,7 @@ name: Auto-import new repos to Vercel
 
 on:
   schedule:
-    - cron: "*/1 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 jobs:
@@ -19,7 +19,7 @@ jobs:
       - name: Install Octokit
         run: npm install @octokit/rest
 
-      - name: Run Vercel API importer
+      - name: Run Vercel importer
         env:
           GH_PAT: ${{ secrets.GH_PAT }}
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
