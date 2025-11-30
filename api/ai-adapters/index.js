@@ -1,12 +1,14 @@
 import { PerplexityAdapter } from "./perplexity.js";
 import { YandexGPTAdapter } from "./yandex-gpt.js";
 import { QwenAdapter } from "./qwen.js";
+import { NeuroApi } from "./neuro.js";
 
 const adapters = {
   perplexity: PerplexityAdapter,
   yandex: YandexGPTAdapter,
   "yandex-gpt": YandexGPTAdapter,
   qwen: QwenAdapter,
+  neuro: NeuroApi,
 };
 
 export function getAdapter(providerName) {
@@ -21,4 +23,4 @@ export function getAdapter(providerName) {
   return new AdapterClass();
 }
 
-export { PerplexityAdapter, YandexGPTAdapter, QwenAdapter };
+export { PerplexityAdapter, YandexGPTAdapter, QwenAdapter, NeuroApi };

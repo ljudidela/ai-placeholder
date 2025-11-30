@@ -1,14 +1,14 @@
-export class QwenAdapter {
+export class NeuroAdapter {
   constructor() {
-    this.name = "qwen";
-    this.modelUri = `gpt://${process.env.YANDEX_FOLDER_ID}/qwen3-235b-a22b-fp8/latest`;
+    this.name = "neuro";
+    this.modelUri = "gemini-3-pro-preview-thinking";
   }
 
   async generateCode(prompt) {
-    console.log(`QWEN → /chat/completions (OpenAI-совместимый)`);
+    console.log(`GEMINI (NeuroAPI) → /v1/chat/completions`);
     console.log(`   Модель: ${this.modelUri}`);
 
-    // Твоя схема — копия из настроек Yandex Cloud
+    // Схема для Gemini (без enum, type как массив)
     const jsonSchema = {
       type: "array",
       minItems: 1,
@@ -19,35 +19,32 @@ export class QwenAdapter {
         additionalProperties: false,
         properties: {
           path: { type: "string" },
-          action: { type: "string", enum: ["create", "update", "delete"] },
+          action: { type: "string" },
           content: { type: ["string", "null"] },
         },
       },
     };
 
     const requestBody = {
-      model: this.modelUri, // ← model, а не modelUri
-      temperature: 0.5,
+      model: this.modelUri,
+      temperature: 0.1,
       max_tokens: 32000,
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "file_operations",
-          strict: true, // ← ЭТО КЛЮЧЕВОЕ: модель не посмеет выебнуться
-          schema: jsonSchema,
-        },
+      generation_config: {
+        response_mime_type: "application/json",
+        response_schema: jsonSchema,
       },
       messages: [
         {
           role: "system",
-          content: `Ты — автономный агент-программист, который общается с внешним миром ТОЛЬКО через строго структурированный JSON по указанной ниже схеме. 
+          content: `Ты — автономный агент-программист, который общается с внешним миром ТОЛЬКО через строго структурированный JSON по указанной ниже схеме.
 
 Правила, которые ты обязан соблюдать без единого исключения:
-1. Отвечай ИСКЛЮЧИТЕЛЬНО валидным JSON, соответствующим схеме. Никакого текста до, после или внутри JSON быть не должно.
+1. Отвечай ИСКЛЮЧИТЕЛЬНО валидным JSON, соответствующим схеме. Никакого текста до, после или внутри JSON быть не должно. НЕ добавляй markdown, backticks или \`\`\`json.
 2. Не пиши объяснения, не пиши комментарии, не используй markdown.
 3. Если нужно создать/обновить файл — указывай точный относительный путь без начального слеша.
-4. В поле content используй \n для переноса строки и экранируй обратные слеши, кавычки и другие спецсимволы, если они есть в коде.
-5. Если ничего делать не нужно — возвращай пустой массив [].`,
+4. В поле content используй \\n для переноса строки и экранируй обратные слеши, кавычки и другие спецсимволы, если они есть в коде. Если контент пустой — используй null.
+5. action может быть ТОЛЬКО: "create", "update" или "delete". НИКОГДА не используй другие значения.
+6. Если ничего делать не нужно — возвращай пустой массив [].`,
         },
         { role: "user", content: prompt },
       ],
@@ -58,41 +55,46 @@ export class QwenAdapter {
     console.log(prompt);
     console.log("═".repeat(80));
 
-    console.log(`\nОТПРАВЛЯЕМ ЗАПРОС на /chat/completions...`);
+    console.log(`\nОТПРАВЛЯЕМ ЗАПРОС на /v1/chat/completions...`);
     console.log(`   Body (полный):`);
     console.log(JSON.stringify(requestBody, null, 2));
 
-    const response = await fetch(
-      "https://llm.api.cloud.yandex.net/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Api-Key ${process.env.YANDEX_API_KEY}`,
-        },
-        body: JSON.stringify(requestBody),
-      }
-    );
+    const response = await fetch("https://neuroapi.host/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.NEURO_API_KEY}`,
+      },
+      body: JSON.stringify(requestBody),
+    });
 
     if (!response.ok) {
       const err = await response.text();
       console.error(
-        `\nYANDEX ERROR ${response.status}: ${err.substring(0, 500)}`
+        `\nNEUROAPI ERROR ${response.status}: ${err.substring(0, 500)}`
       );
-      throw new Error(`YandexGPT: ${response.status} ${err}`);
+      throw new Error(`NeuroAPI/Gemini: ${response.status} ${err}`);
     }
 
     const data = await response.json();
-    const rawContent = data.choices?.[0]?.message?.content?.trim() || "";
+    let rawContent = data.choices?.[0]?.message?.content?.trim() || "";
 
     if (!rawContent) {
-      console.error("Пустой content от YandexGPT!");
+      console.error("Пустой content от Gemini!");
       throw new Error("Пустой ответ");
     }
 
-    console.log(`\nОТВЕТ ПОЛУЧЕН! Длина: ${rawContent.length} символов`);
-    console.log(`RAW ОТВЕТ (начало + середина + конец):`);
+    // Убираем \`\`\`json и \`\`\`
+    rawContent = rawContent
+      .replace(/^```json\s*\n?/, "")
+      .replace(/\n?```\s*$/, "")
+      .trim();
 
+    console.log(
+      `\nОЧИЩЕННЫЙ RAW ОТВЕТ (после удаления MD): Длина: ${rawContent.length} символов`
+    );
+
+    console.log(`ОЧИЩЕННЫЙ RAW (начало + середина + конец):`);
     const chunk = 600;
     const start = rawContent.substring(0, chunk);
     const middle =
@@ -113,7 +115,6 @@ export class QwenAdapter {
     console.log(`   └─ КОНЕЦ ───────────────────────────────────────`);
     console.log(end);
 
-    // Чистый JSON — парсим без хаков
     let parsed;
     try {
       parsed = JSON.parse(rawContent);
@@ -127,11 +128,12 @@ export class QwenAdapter {
         );
       });
     } catch (e) {
+      console.error(`\nФАТАЛЬНО: JSON.parse провалился даже после очистки!`);
       console.error(
-        `\nФАТАЛЬНО: JSON.parse провалился даже с response_format!`
+        `Первые 1000 символов очищенного:`,
+        rawContent.substring(0, 1000)
       );
-      console.error(`Первые 1000 символов:`, rawContent.substring(0, 1000));
-      throw new Error(`YandexGPT вернул невалидный JSON: ${e.message}`);
+      throw new Error(`Gemini вернул невалидный JSON: ${e.message}`);
     }
 
     if (!Array.isArray(parsed) || parsed.length === 0) {
