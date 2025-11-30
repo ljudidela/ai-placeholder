@@ -1,42 +1,53 @@
-// import-vercel-org.js  ← 100% работает в ESM (type: "module")
-import { execSync } from "child_process";
-import { Octokit } from "@octokit/rest";
-
 const octokit = new Octokit({ auth: process.env.GH_PAT });
 const ORG = "ljudidela";
-const VERCEL_TOKEN = process.env.VERCEL_TOKEN;
 
-async function importAllRepos() {
+async function importAll() {
   const { data: repos } = await octokit.repos.listForOrg({ org: ORG });
 
   for (const repo of repos) {
-    // Пропускаем архивные и публичные (если хочешь — убери условие)
-    if (repo.archived || !repo.private) continue;
-
-    const projectName = repo.name;
+    if (repo.archived || repo.fork) continue;
 
     try {
-      // Создаём/линкуем проект в Vercel + сразу деплоим prod
-      execSync(
-        `vercel link --yes --token ${VERCEL_TOKEN} --project ${projectName} --scope personal`,
-        { stdio: "ignore" }
+      // Проверяем, есть ли уже проект
+      const check = await fetch(
+        `https://api.vercel.com/v9/projects/${repo.name}`,
+        {
+          headers: { Authorization: `Bearer ${process.env.VERCEL_TOKEN}` },
+        }
       );
-      execSync(`vercel --prod --yes --token ${VERCEL_TOKEN} --force`, {
-        stdio: "ignore",
-      });
-      console.log(`Импортировано и задеплоено: ${projectName}`);
-    } catch (e) {
-      // Если уже существует — просто игнорируем ошибку
-      if (
-        e.message.includes("already exists") ||
-        e.message.includes("linked")
-      ) {
-        console.log(`Уже есть: ${projectName}`);
+
+      if (check.status === 404) {
+        // Создаём новый проект
+        const create = await fetch("https://api.vercel.com/v9/projects", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${process.env.VERCEL_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            name: repo.name,
+            gitRepository: {
+              type: "github",
+              repo: `${ORG}/${repo.name}`,
+            },
+          }),
+        });
+
+        if (create.ok) {
+          console.log(`Создан и задеплоен: ${repo.name}`);
+        } else {
+          console.error(`Ошибка создания ${repo.name}:`, await create.text());
+        }
       } else {
-        console.error(`Ошибка с ${projectName}:`, e.message);
+        console.log(`Уже существует: ${repo.name}`);
       }
+    } catch (e) {
+      console.error(`Критическая ошибка с ${repo.name}:`, e.message);
     }
+
+    // Чтобы не словить rate-limit
+    await new Promise((r) => setTimeout(r, 1000));
   }
 }
 
-importAllRepos().catch(console.error);
+importAll();
