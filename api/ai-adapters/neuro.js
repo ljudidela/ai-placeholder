@@ -1,7 +1,7 @@
 export class NeuroAdapter {
   constructor() {
     this.name = "neuro";
-    this.modelUri = "claude-sonnet-4-5-20250929";
+    this.modelUri = "deepseek-v3-0324";
   }
 
   async generateCode(prompt) {
