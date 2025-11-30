@@ -2,8 +2,8 @@ name: Auto-import new repos to Vercel
 
 on:
   schedule:
-    - cron: "*/5 * * * *" # каждые 30 минут (можно реже)
-  workflow_dispatch: # или запускать вручную
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
 
 jobs:
   import:
@@ -16,11 +16,14 @@ jobs:
         with:
           node-version: 20
 
+      - name: Install Vercel CLI
+        run: npm i -g vercel
+
       - name: Install Octokit
         run: npm install @octokit/rest
 
       - name: Run import script
         env:
-          GITHUB_TOKEN: ${{ secrets.GH_PAT }} # Personal Access Token с правами repo
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }} # из vercel.com/account/tokens
+          GH_PAT: ${{ secrets.GH_PAT }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: node import-vercel-org.js
