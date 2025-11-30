@@ -8,7 +8,7 @@ const adapters = {
   yandex: YandexGPTAdapter,
   "yandex-gpt": YandexGPTAdapter,
   qwen: QwenAdapter,
-  neuro: NeuroApi,
+  neuro: NeuroAdapter,
 };
 
 export function getAdapter(providerName) {
