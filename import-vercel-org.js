@@ -39,6 +39,25 @@ async function importAll() {
 
         if (res.ok) {
           console.log(`Создан и задеплоен: ${repo.name}`);
+
+          await fetch("https://api.vercel.com/v13/deployments", {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${process.env.VERCEL_TOKEN}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              name: repo.name,
+              project: repo.name,
+              gitSource: {
+                repoId: repo.id,
+                type: "github",
+                ref: "main",
+              },
+              target: "production",
+            }),
+          });
+          console.log(`Запущен первый деплой: ${repo.name}`);
         } else {
           const text = await res.text();
           console.error(
