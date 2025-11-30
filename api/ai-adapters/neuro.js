@@ -1,7 +1,7 @@
 export class NeuroAdapter {
   constructor() {
     this.name = "neuro";
-    this.modelUri = "grok-4";
+    this.modelUri = "gemini-3-pro-preview-thinking";
   }
 
   async generateCode(prompt) {
@@ -27,7 +27,7 @@ export class NeuroAdapter {
 
     const requestBody = {
       model: this.modelUri,
-      temperature: 0.1,
+      temperature: 0.5,
       max_tokens: 32000,
       generation_config: {
         response_mime_type: "application/json",
