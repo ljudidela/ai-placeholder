@@ -156,7 +156,7 @@ export default async function handler(req, res) {
       await octokit.repos.createInOrg({
         org: ORG,
         name: finalRepoName,
-        private: true,
+        private: false,
         auto_init: true,
       });
       repoInfo = await octokit.repos.get({ owner: ORG, repo: finalRepoName });
