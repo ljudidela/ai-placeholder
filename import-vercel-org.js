@@ -1,30 +1,42 @@
-// import-vercel-org.js (Node.js, запусти node import-vercel-org.js)
-const { execSync } = require("child_process");
-const { Octokit } = require("@octokit/rest");
+// import-vercel-org.js  ← 100% работает в ESM (type: "module")
+import { execSync } from "child_process";
+import { Octokit } from "@octokit/rest";
 
-const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+const octokit = new Octokit({ auth: process.env.GH_PAT });
 const ORG = "ljudidela";
-const VERCEL_TOKEN = process.env.VERCEL_TOKEN; // Твой Vercel API token (vercel.com/account/tokens)
+const VERCEL_TOKEN = process.env.VERCEL_TOKEN;
 
 async function importAllRepos() {
   const { data: repos } = await octokit.repos.listForOrg({ org: ORG });
+
   for (const repo of repos) {
-    if (repo.name.startsWith("ai-") && !repo.archived) {
-      // Фильтр на репо от Володи
-      try {
-        // Vercel CLI: import repo в Vercel (создаст проект если нет)
-        execSync(
-          `vercel import ${repo.full_name} --token ${VERCEL_TOKEN} --scope your-team-or-personal --yes`,
-          { stdio: "inherit" }
-        );
-        console.log(`✅ Импортировано и задеплоено: ${repo.html_url}`);
-      } catch (e) {
-        if (e.message.includes("already exists"))
-          console.log(`⏭️ ${repo.name} уже импортировано`);
-        else console.error(`❌ Ошибка для ${repo.name}:`, e.message);
+    // Пропускаем архивные и публичные (если хочешь — убери условие)
+    if (repo.archived || !repo.private) continue;
+
+    const projectName = repo.name;
+
+    try {
+      // Создаём/линкуем проект в Vercel + сразу деплоим prod
+      execSync(
+        `vercel link --yes --token ${VERCEL_TOKEN} --project ${projectName} --scope personal`,
+        { stdio: "ignore" }
+      );
+      execSync(`vercel --prod --yes --token ${VERCEL_TOKEN} --force`, {
+        stdio: "ignore",
+      });
+      console.log(`Импортировано и задеплоено: ${projectName}`);
+    } catch (e) {
+      // Если уже существует — просто игнорируем ошибку
+      if (
+        e.message.includes("already exists") ||
+        e.message.includes("linked")
+      ) {
+        console.log(`Уже есть: ${projectName}`);
+      } else {
+        console.error(`Ошибка с ${projectName}:`, e.message);
       }
     }
   }
 }
 
-importAllRepos();
+importAllRepos().catch(console.error);
