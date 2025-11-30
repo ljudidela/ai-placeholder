@@ -1,7 +1,7 @@
 import { PerplexityAdapter } from "./perplexity.js";
 import { YandexGPTAdapter } from "./yandex-gpt.js";
 import { QwenAdapter } from "./qwen.js";
-import { NeuroApi } from "./neuro.js";
+import { NeuroAdapter } from "./neuro.js";
 
 const adapters = {
   perplexity: PerplexityAdapter,
