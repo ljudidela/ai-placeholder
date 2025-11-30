@@ -23,4 +23,4 @@ export function getAdapter(providerName) {
   return new AdapterClass();
 }
 
-export { PerplexityAdapter, YandexGPTAdapter, QwenAdapter, NeuroApi };
+export { PerplexityAdapter, YandexGPTAdapter, QwenAdapter, NeuroAdapter };
