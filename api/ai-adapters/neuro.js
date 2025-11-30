@@ -1,7 +1,7 @@
 export class NeuroAdapter {
   constructor() {
     this.name = "neuro";
-    this.modelUri = "grok-4";
+    this.modelUri = "gpt-5-chat-latest";
   }
 
   async generateCode(prompt) {
