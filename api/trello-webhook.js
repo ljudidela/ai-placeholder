@@ -1,4 +1,3 @@
-// api/handler.js
 import { Octokit } from "@octokit/rest";
 import raw from "raw-body";
 import { getAdapter } from "./ai-adapters/index.js";
@@ -6,14 +5,12 @@ import { getAdapter } from "./ai-adapters/index.js";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { readFile } from "fs/promises";
-import crypto from "crypto"; // <-- добавь это
+import crypto from "crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const promptCache = new Map();
-
-// Добавляем кэш последнего хэша описания карточки
 const lastProcessedHash = new Map();
 
 async function loadPrompt(fileName) {
@@ -88,8 +85,9 @@ const ORG = "ljudidela";
 const GITHUB_BASE = `https://github.com/${ORG}`;
 
 const activeProcessing = new Map();
-const processedContent = new Map(); // больше не нужен, но оставляем для совместимости
-const DEBOUNCE_TTL = 60_000; // увеличил до минуты — надёжнее
+const processedContent = new Map();
+
+const currentHash = crypto.createHash("md5").update(cardDesc).digest("hex");
 
 // ─────────────────────── Хэндлер ───────────────────────
 export default async function handler(req, res) {
@@ -120,24 +118,30 @@ export default async function handler(req, res) {
 
   if (!cardId || !cardName || !cardDesc) return res.status(200).end();
 
-  // === УЛУЧШЕННАЯ ДЕДУПЛИКАЦИЯ ===
+  // === ЖЕЛЕЗНАЯ ЗАЩИТА ОТ ДУБЛЕЙ ===
   if (activeProcessing.has(cardId)) {
     console.log(`Дубль: карточка ${cardId} уже в обработке`);
     return res.status(200).json({ status: "already_processing" });
   }
 
-  const currentHash = crypto.createHash("md5").update(cardDesc).digest("hex");
+  if (
+    processedContent.has(cardId) &&
+    Date.now() - processedContent.get(cardId) < 90_000
+  ) {
+    console.log(`Дедуп: карточка ${cardId} недавно обработана (меньше 90 сек)`);
+    return res.status(200).json({ status: "recently_processed" });
+  }
 
+  const currentHash = crypto.createHash("md5").update(cardDesc).digest("hex");
   const lastHash = lastProcessedHash.get(cardId);
   if (lastHash === currentHash) {
-    console.log(
-      `Дедуп: карточка ${cardId} — описание не изменилось существенно`
-    );
+    console.log(`Дедуп: карточка ${cardId} — описание не изменилось`);
     return res.status(200).json({ status: "no_changes_detected" });
   }
 
   activeProcessing.set(cardId, true);
-  lastProcessedHash.set(cardId, currentHash); // запоминаем даже если упадёт ниже — чтобы не спамить
+  processedContent.set(cardId, Date.now());
+  lastProcessedHash.set(cardId, currentHash);
   console.log(`СТАРТ обработки: "${cardName}" (${cardId})`);
 
   let finalRepoName, repoInfo;
@@ -192,7 +196,7 @@ export default async function handler(req, res) {
         .slice(0, 100)
         .join("\n");
 
-      existingRepoContext = `\n\n=== СУЩЕСТВУЮЩИЙ ПРОЕКТ ===\nСтруктура:\n${filesList}\n\nВАЖНО: используй "update" для существующих файлов!\nВноси правки максимально внимательно и точечно, не трогай не относящиеся к задаче файлы. При фиксе багов не меняй существующую фукциональность, а доводи её до ума.\n`;
+      existingRepoContext = `\n\n=== СУЩЕСТВУЮЩИЙ ПРОЕКТ ===\nСтруктура:\n${filesList}\n\nВАЖНО: используй "update" для существующих файлов!\n`;
     } catch (e) {
       if (e.status !== 404) throw e;
       existingRepoContext = `\n\n=== НОВЫЙ ПРОЕКТ (${projectType.toUpperCase()}) ===\nСоздай всё с нуля по лучшим практикам.\n`;
@@ -302,16 +306,20 @@ export default async function handler(req, res) {
       `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${
         process.env.TRELLO_KEY
       }&token=${process.env.TRELLO_TOKEN}&text=${encodeURIComponent(
-        "AI Ошибка: " + err.message.slice(0, 400)
+        "AI Ошибка: " + (err.message || err).slice(0, 400)
       )}`,
       { method: "POST" }
     ).catch(() => {});
 
+    // ←←← ГЛАВНОЕ: НЕ СНИМАЕМ БЛОКИРОВКУ СРАЗУ ПОСЛЕ ОШИБКИ!
+    setTimeout(() => {
+      activeProcessing.delete(cardId);
+      console.log(`Сняли блокировку после ошибки для карточки ${cardId}`);
+    }, 180_000); // 3 минуты
+
     return res.status(500).json({ error: err.message });
   } finally {
-    activeProcessing.delete(cardId);
-    // processedContent больше не используем по старому ключу — оставляем только хэш
-    // но чистим старый кэш на всякий
+    // Больше НИЧЕГО не трогаем с activeProcessing!
     if (processedContent.size > 10_000) {
       const cutoff = Date.now() - 3_600_000;
       for (const [k, t] of processedContent.entries()) {
