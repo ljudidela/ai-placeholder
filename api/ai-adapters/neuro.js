@@ -1,7 +1,7 @@
 export class NeuroAdapter {
   constructor() {
     this.name = "neuro";
-    this.modelUri = "gemini-3-pro-preview";
+    this.modelUri = "gemini-3-pro-preview-thinking";
   }
 
   async generateCode(prompt) {
