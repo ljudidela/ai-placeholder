@@ -192,7 +192,7 @@ export default async function handler(req, res) {
         .slice(0, 100)
         .join("\n");
 
-      existingRepoContext = `\n\n=== СУЩЕСТВУЮЩИЙ ПРОЕКТ ===\nСтруктура:\n${filesList}\n\nВАЖНО: используй "update" для существующих файлов!\n`;
+      existingRepoContext = `\n\n=== СУЩЕСТВУЮЩИЙ ПРОЕКТ ===\nСтруктура:\n${filesList}\n\nВАЖНО: используй "update" для существующих файлов!\nВноси правки максимально внимательно и точечно, не трогай не относящиеся к задаче файлы. При фиксе багов не меняй существующую фукциональность, а доводи её до ума.\n`;
     } catch (e) {
       if (e.status !== 404) throw e;
       existingRepoContext = `\n\n=== НОВЫЙ ПРОЕКТ (${projectType.toUpperCase()}) ===\nСоздай всё с нуля по лучшим практикам.\n`;
