@@ -6,11 +6,15 @@ import { getAdapter } from "./ai-adapters/index.js";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { readFile } from "fs/promises";
+import crypto from "crypto"; // <-- добавь это
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const promptCache = new Map();
+
+// Добавляем кэш последнего хэша описания карточки
+const lastProcessedHash = new Map();
 
 async function loadPrompt(fileName) {
   if (promptCache.has(fileName)) return promptCache.get(fileName);
@@ -84,8 +88,8 @@ const ORG = "ljudidela";
 const GITHUB_BASE = `https://github.com/${ORG}`;
 
 const activeProcessing = new Map();
-const processedContent = new Map();
-const DEBOUNCE_TTL = 30_000;
+const processedContent = new Map(); // больше не нужен, но оставляем для совместимости
+const DEBOUNCE_TTL = 60_000; // увеличил до минуты — надёжнее
 
 // ─────────────────────── Хэндлер ───────────────────────
 export default async function handler(req, res) {
@@ -116,20 +120,24 @@ export default async function handler(req, res) {
 
   if (!cardId || !cardName || !cardDesc) return res.status(200).end();
 
-  // Дедупликация
+  // === УЛУЧШЕННАЯ ДЕДУПЛИКАЦИЯ ===
   if (activeProcessing.has(cardId)) {
     console.log(`Дубль: карточка ${cardId} уже в обработке`);
     return res.status(200).json({ status: "already_processing" });
   }
-  const contentKey = `${cardId}_${cardDesc}`;
-  if (
-    processedContent.has(contentKey) &&
-    Date.now() - processedContent.get(contentKey) < DEBOUNCE_TTL
-  ) {
-    return res.status(200).json({ status: "deduped" });
+
+  const currentHash = crypto.createHash("md5").update(cardDesc).digest("hex");
+
+  const lastHash = lastProcessedHash.get(cardId);
+  if (lastHash === currentHash) {
+    console.log(
+      `Дедуп: карточка ${cardId} — описание не изменилось существенно`
+    );
+    return res.status(200).json({ status: "no_changes_detected" });
   }
 
   activeProcessing.set(cardId, true);
+  lastProcessedHash.set(cardId, currentHash); // запоминаем даже если упадёт ниже — чтобы не спамить
   console.log(`СТАРТ обработки: "${cardName}" (${cardId})`);
 
   let finalRepoName, repoInfo;
@@ -302,8 +310,8 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: err.message });
   } finally {
     activeProcessing.delete(cardId);
-    processedContent.set(contentKey, Date.now());
-
+    // processedContent больше не используем по старому ключу — оставляем только хэш
+    // но чистим старый кэш на всякий
     if (processedContent.size > 10_000) {
       const cutoff = Date.now() - 3_600_000;
       for (const [k, t] of processedContent.entries()) {
