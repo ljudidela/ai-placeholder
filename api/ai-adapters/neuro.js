@@ -28,7 +28,10 @@ export class NeuroAdapter {
     const requestBody = {
       model: this.modelUri,
       temperature: 0.2,
+      top_p: 0.6,
       max_tokens: 32000,
+      frequency_penalty: 0.1,
+      presence_penalty: 0.0,
       generation_config: {
         response_mime_type: "application/json",
         response_schema: jsonSchema,
