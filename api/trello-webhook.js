@@ -12,7 +12,14 @@ const __dirname = dirname(__filename);
 
 const promptCache = new Map();
 const lastProcessedHash = new Map();
+const activeProcessing = new Map();
+const processedContent = new Map(); // timestamp последнего успешного обработки
 
+const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+const ORG = "ljudidela";
+const GITHUB_BASE = `https://github.com/${ORG}`;
+
+// ====================== УТИЛИТЫ ======================
 async function loadPrompt(fileName) {
   if (promptCache.has(fileName)) return promptCache.get(fileName);
 
@@ -28,7 +35,6 @@ async function loadPrompt(fileName) {
   }
 }
 
-// ─────────────────────── Сборка промпта ───────────────────────
 async function buildPrompt(cardDesc, existingRepoContext, projectType) {
   const base = await loadPrompt("base-system-prompt.txt");
 
@@ -52,7 +58,6 @@ ${cardDesc}
 Отвечай ТОЛЬКО чистым JSON-массивом операций. Никакого лишнего текста.`;
 }
 
-// ─────────────────────── Определение типа проекта ───────────────────────
 function getProjectType(payload, boardName) {
   if (process.env.PROJECT_TYPE) {
     return process.env.PROJECT_TYPE.trim().toLowerCase();
@@ -79,17 +84,7 @@ function getProjectType(payload, boardName) {
   return "web-vite";
 }
 
-// ─────────────────────── Основные константы ───────────────────────
-const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
-const ORG = "ljudidela";
-const GITHUB_BASE = `https://github.com/${ORG}`;
-
-const activeProcessing = new Map();
-const processedContent = new Map();
-
-const currentHash = crypto.createHash("md5").update(cardDesc).digest("hex");
-
-// ─────────────────────── Хэндлер ───────────────────────
+// ====================== ХЭНДЛЕР ======================
 export default async function handler(req, res) {
   if (req.method === "HEAD" || req.method === "GET") {
     return res.status(200).send("Trello webhook alive");
@@ -104,64 +99,65 @@ export default async function handler(req, res) {
   }
 
   const actionType = payload.action?.type;
-  if (!["createCard", "updateCard"].includes(actionType))
+  if (!["createCard", "updateCard"].includes(actionType)) {
     return res.status(200).end();
+  }
 
+  // Проверяем, изменилось ли только описание
   if (actionType === "updateCard") {
     const changed = Object.keys(payload.action?.data?.old || {});
     if (!changed.includes("desc")) return res.status(200).end();
   }
 
-  const cardId = payload.action.data.card.id;
-  const cardName = payload.action.data.card.name?.trim();
-  const cardDesc = (payload.action.data.card.desc || "").trim();
+  // === ДАННЫЕ КАРТОЧКИ ===
+  const cardId = payload.action?.data?.card?.id;
+  const cardName = payload.action?.data?.card?.name?.trim() || "Без имени";
+  const cardDesc = (payload.action?.data?.card?.desc || "").trim();
 
-  if (!cardId || !cardName || !cardDesc) return res.status(200).end();
+  if (!cardId || !cardDesc) {
+    return res.status(200).end();
+  }
 
-  // === ЖЕЛЕЗНАЯ ЗАЩИТА ОТ ДУБЛЕЙ ===
+  // === ДЕДУПЛИКАЦИЯ ===
   if (activeProcessing.has(cardId)) {
-    console.log(`Дубль: карточка ${cardId} уже в обработке`);
+    console.log(`[ДУБЛЬ] Карточка ${cardId} уже обрабатывается`);
     return res.status(200).json({ status: "already_processing" });
   }
 
-  if (
-    processedContent.has(cardId) &&
-    Date.now() - processedContent.get(cardId) < 90_000
-  ) {
-    console.log(`Дедуп: карточка ${cardId} недавно обработана (меньше 90 сек)`);
+  const lastProcessedTime = processedContent.get(cardId);
+  if (lastProcessedTime && Date.now() - lastProcessedTime < 30_000) {
+    console.log(`[ДЕДУП] Карточка ${cardId} недавно обработана`);
     return res.status(200).json({ status: "recently_processed" });
   }
 
+  // Хэш описания — если не поменялось, то и делать нечего
   const currentHash = crypto.createHash("md5").update(cardDesc).digest("hex");
-  const lastHash = lastProcessedHash.get(cardId);
-  if (lastHash === currentHash) {
-    console.log(`Дедуп: карточка ${cardId} — описание не изменилось`);
-    return res.status(200).json({ status: "no_changes_detected" });
+  if (lastProcessedHash.get(cardId) === currentHash) {
+    console.log(`[ДЕДУП] Описание карточки ${cardId} не изменилось`);
+    return res.status(200).json({ status: "no_changes" });
   }
 
   activeProcessing.set(cardId, true);
-  processedContent.set(cardId, Date.now());
-  lastProcessedHash.set(cardId, currentHash);
-  console.log(`СТАРТ обработки: "${cardName}" (${cardId})`);
+  console.log(`НАЧАЛО обработки: "${cardName}" (${cardId})`);
 
   let finalRepoName, repoInfo;
 
   try {
-    // ─── Получаем имя доски ───
+    // === ИМЯ ДОСКИ ===
     let boardName =
       payload.action?.data?.board?.name || payload.model?.name || "ai-board";
     if (!boardName) {
       const r = await fetch(
         `https://api.trello.com/1/cards/${cardId}/board?key=${process.env.TRELLO_KEY}&token=${process.env.TRELLO_TOKEN}`
       );
-      if (r.ok) boardName = (await r.json()).name;
+      if (r.ok) boardName = (await r.json()).name || "ai-board";
     }
-    boardName = boardName.trim() || "ai-board";
+    boardName = boardName.trim();
 
     const projectType = getProjectType(payload, boardName);
-    console.log(`Тип проекта → ${projectType}`);
+    console.log(`Тип проекта: ${projectType}`);
 
-    // ─── Формируем имя репозитория ───
+    // === ИМЯ РЕПОЗИТОРИЯ ===
     const sanitized = boardName
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
@@ -178,7 +174,7 @@ export default async function handler(req, res) {
 
     finalRepoName = prefix + (sanitized || "project");
 
-    // ─── Контекст существующего репо ───
+    // === КОНТЕКСТ СУЩЕСТВУЮЩЕГО РЕПО ===
     let existingRepoContext = "";
     try {
       repoInfo = await octokit.repos.get({ owner: ORG, repo: finalRepoName });
@@ -202,6 +198,7 @@ export default async function handler(req, res) {
       existingRepoContext = `\n\n=== НОВЫЙ ПРОЕКТ (${projectType.toUpperCase()}) ===\nСоздай всё с нуля по лучшим практикам.\n`;
     }
 
+    // Создаём репо, если его нет
     if (!repoInfo) {
       await octokit.repos.createInOrg({
         org: ORG,
@@ -223,14 +220,15 @@ export default async function handler(req, res) {
     const fileOps = await aiAdapter.generateCode(prompt);
 
     if (!Array.isArray(fileOps) || fileOps.length === 0) {
-      throw new Error("AI вернул пустой массив операций");
+      throw new Error("AI вернул пустой или некорректный массив операций");
     }
 
     const results = { success: [], failed: [] };
 
     for (const op of fileOps) {
-      if (!op?.path || !["create", "update", "delete"].includes(op.action))
+      if (!op?.path || !["create", "update", "delete"].includes(op.action)) {
         continue;
+      }
 
       const path = op.path.replace(/^\/+/, "");
       let content = op.content ?? "";
@@ -244,7 +242,7 @@ export default async function handler(req, res) {
       }
 
       try {
-        let sha;
+        let sha = undefined;
         try {
           const { data } = await octokit.repos.getContent({
             owner: ORG,
@@ -253,7 +251,9 @@ export default async function handler(req, res) {
             ref: targetBranch,
           });
           sha = data.sha;
-        } catch (_) {}
+        } catch (_) {
+          /* файл не существует — ок */
+        }
 
         if (op.action === "delete") {
           if (sha) {
@@ -277,12 +277,17 @@ export default async function handler(req, res) {
             sha,
           });
         }
+
         results.success.push({ path, action: op.action });
       } catch (err) {
         results.failed.push({ path, error: err.message });
         console.error(`Ошибка ${op.action} ${path}:`, err.message);
       }
     }
+
+    // Обновляем кэши только после успешной обработки
+    lastProcessedHash.set(cardId, currentHash);
+    processedContent.set(cardId, Date.now());
 
     const repoUrl = `${GITHUB_BASE}/${finalRepoName}`;
     const comment = `Репозиторий обновлён (${projectType})\n${repoUrl}\n\nУспешно: ${results.success.length} файлов\nОшибок: ${results.failed.length}`;
@@ -302,28 +307,34 @@ export default async function handler(req, res) {
     });
   } catch (err) {
     console.error("КРИТИЧЕСКАЯ ОШИБКА:", err);
+
     await fetch(
       `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${
         process.env.TRELLO_KEY
       }&token=${process.env.TRELLO_TOKEN}&text=${encodeURIComponent(
-        "AI Ошибка: " + (err.message || err).slice(0, 400)
+        "AI Ошибка: " + (err.message || String(err)).slice(0, 400)
       )}`,
       { method: "POST" }
     ).catch(() => {});
 
-    // ←←← ГЛАВНОЕ: НЕ СНИМАЕМ БЛОКИРОВКУ СРАЗУ ПОСЛЕ ОШИБКИ!
+    // Даём время на повторную попытку, но не сразу разблокируем
     setTimeout(() => {
       activeProcessing.delete(cardId);
-      console.log(`Сняли блокировку после ошибки для карточки ${cardId}`);
+      console.log(`Сняли блокировку после ошибки для ${cardId}`);
     }, 180_000); // 3 минуты
 
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message || "Internal error" });
   } finally {
-    // Больше НИЧЕГО не трогаем с activeProcessing!
+    // Всегда снимаем блокировку, если не сняли в catch
+    if (activeProcessing.has(cardId)) {
+      activeProcessing.delete(cardId);
+    }
+
+    // Очистка старых записей из processedContent
     if (processedContent.size > 10_000) {
-      const cutoff = Date.now() - 3_600_000;
-      for (const [k, t] of processedContent.entries()) {
-        if (t < cutoff) processedContent.delete(k);
+      const cutoff = Date.now() - 3_600_000; // 1 час
+      for (const [id, time] of processedContent.entries()) {
+        if (time < cutoff) processedContent.delete(id);
       }
     }
   }
