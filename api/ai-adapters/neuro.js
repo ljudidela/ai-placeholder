@@ -21,10 +21,8 @@ export class NeuroAdapter {
 
     const isPreciseEdit =
       userTask.toLowerCase().includes("точечно") ||
-      userTask.toLowerCase().includes("только") ||
       userTask.toLowerCase().includes("исправляй только") ||
       userTask.toLowerCase().includes("не трогай") ||
-      userTask.toLowerCase().includes("минимальные") ||
       userTask.toLowerCase().includes("не меняй") ||
       userTask.toLowerCase().includes("остальное оставь") ||
       userTask.includes("!!") || // Двойные восклицательные
@@ -59,14 +57,8 @@ export class NeuroAdapter {
 
     const requestBody = {
       model: this.modelUri,
-      // КРИТИЧЕСКИ ВАЖНО: разные настройки
-      temperature: isPreciseEdit ? 0.05 : 0.2,
-      top_p: isPreciseEdit ? 0.3 : 0.6,
-      // Добавляем top_k для еще большей детерминированности
-      ...(isPreciseEdit && { top_k: 10 }),
+      temperature: isPreciseEdit ? 0.1 : 0.5,
       max_tokens: 32000,
-      frequency_penalty: isPreciseEdit ? 0.3 : 0.1,
-      presence_penalty: 0.0,
       generation_config: {
         response_mime_type: "application/json",
         response_schema: jsonSchema,
@@ -99,13 +91,7 @@ ${
    - Стиль именования (если не просят)
 4. Не оптимизировать, не рефакторить без явного запроса
 5. Если задача: "поменять цвет фона на черный" → меняй ТОЛЬКО background-color
-6. Сравни новую версию со старой — изменения должны быть минимальны
-
-Пример правильного поведения:
-БЫЛО: "div { color: blue; background: white; font-size: 16px; }"
-ЗАДАЧА: "поменяй фон на черный"
-СТАЛО: "div { color: blue; background: black; font-size: 16px; }"
-НЕПРАВИЛЬНО: "div { color: #0000ff; background: #000000; font-size: 1rem; }"
+6. Сравни новую версию со старой — изменения должны быть минимальны"
 
 КРИТИЧЕСКИ ВАЖНО: Проверь каждый файл — не допусти лишних изменений!`
     : ""
