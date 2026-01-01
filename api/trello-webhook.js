@@ -13,11 +13,6 @@ const __dirname = dirname(__filename);
 const ORG = "ljudidela";
 const GITHUB_BASE = `https://github.com/${ORG}`;
 const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
-
-// ────────────── КОНСТАНТЫ ──────────────
-const activeProcessing = new Map(); // карточки в обработке
-const processedContent = new Map(); // дедуп по контенту
-const DEBOUNCE_TTL = 30_000;
 const promptCache = new Map();
 
 // ────────────── HELPERS ──────────────
@@ -67,7 +62,6 @@ function getProjectType(payload, boardName) {
   return "web-vite";
 }
 
-// ────────────── OCTOKIT SAFE WRAPPER ──────────────
 async function safeOctokit(fn, retries = 3, delay = 500) {
   for (let i = 0; i < retries; i++) {
     try {
@@ -93,10 +87,7 @@ export default async function handler(req, res) {
     return res.status(400).end("Invalid JSON");
   }
 
-  // ───── Ответ Trello сразу, чтобы не дергался повторно ─────
   res.status(200).json({ ok: true });
-
-  // ───── Fire-and-wait для AI и GitHub ─────
   processCard(payload).catch((err) => console.error("PROCESS ERROR:", err));
 }
 
@@ -105,10 +96,9 @@ async function processCard(payload) {
   const action = payload.action;
   if (!action) return;
 
-  const actionType = action.type;
-  if (!["createCard", "updateCard"].includes(actionType)) return;
+  if (!["createCard", "updateCard"].includes(action.type)) return;
   if (
-    actionType === "updateCard" &&
+    action.type === "updateCard" &&
     !Object.keys(action.data?.old || {}).includes("desc")
   )
     return;
@@ -119,20 +109,19 @@ async function processCard(payload) {
   const cardDesc = card.desc?.trim();
   if (!cardId || !cardName || !cardDesc) return;
 
-  const contentKey = `${cardId}_${cardDesc}`;
-  if (activeProcessing.has(cardId)) {
-    console.log(`Дубль: карточка ${cardId} уже в обработке`);
-    return;
-  }
-  if (
-    processedContent.has(contentKey) &&
-    Date.now() - processedContent.get(contentKey) < DEBOUNCE_TTL
-  ) {
-    console.log(`Дедуп: карточка ${cardId} уже обработана недавно`);
+  // ─── Проверка метки AI:processing ───
+  const labels = (card.labels || []).map((l) => l.name);
+  if (labels.includes("AI: processing")) {
+    console.log(`Дубль: карточка ${cardId} уже в обработке (метка)`);
     return;
   }
 
-  activeProcessing.set(cardId, true);
+  // ─── Ставим метку processing ───
+  await fetch(
+    `https://api.trello.com/1/cards/${cardId}/labels?key=${process.env.TRELLO_KEY}&token=${process.env.TRELLO_TOKEN}&value=AI: processing`,
+    { method: "POST" }
+  ).catch(() => {});
+
   console.log(`СТАРТ обработки: "${cardName}" (${cardId})`);
 
   let boardName = action.data?.board?.name || payload.model?.name || "ai-board";
@@ -160,7 +149,7 @@ async function processCard(payload) {
     : "";
   const repoName = prefix + (sanitized || "project");
 
-  // ───── Получаем контекст репозитория ─────
+  // ─── Контекст репозитория ───
   let repoInfo,
     repoContext = "";
   try {
@@ -199,7 +188,7 @@ async function processCard(payload) {
 
   const targetBranch = repoInfo.data.default_branch || "main";
 
-  // ───── Формируем промпт и вызываем AI ─────
+  // ─── Промпт и AI ───
   const prompt = await buildPrompt(cardDesc, repoContext, projectType);
   console.log("Отправка запроса в AI/Gemini...");
   const aiAdapter = getAdapter(process.env.AI_PROVIDER || "neuro");
@@ -208,21 +197,19 @@ async function processCard(payload) {
     throw new Error("AI вернул пустой массив операций");
   console.log(`AI вернул ${fileOps.length} операций`);
 
-  // ───── Применяем операции к репо ─────
+  // ─── Применяем операции ───
   const results = { success: [], failed: [] };
   for (const op of fileOps) {
     if (!op?.path || !["create", "update", "delete"].includes(op.action))
       continue;
-
     const path = op.path.replace(/^\/+/, "");
     let content = op.content ?? "";
-    if (typeof content === "string") {
+    if (typeof content === "string")
       content = content
         .replace(/\\n/g, "\n")
         .replace(/\\t/g, "\t")
         .replace(/\\"/g, '"')
         .replace(/\\\\/g, "\\");
-    }
 
     try {
       let sha;
@@ -273,6 +260,7 @@ async function processCard(payload) {
 
   const repoUrl = `${GITHUB_BASE}/${repoName}`;
   const commentText = `Репозиторий обновлён (${projectType})\n${repoUrl}\n\nУспешно: ${results.success.length} файлов\nОшибок: ${results.failed.length}`;
+
   await fetch(
     `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${
       process.env.TRELLO_KEY
@@ -282,14 +270,11 @@ async function processCard(payload) {
     { method: "POST" }
   ).catch(() => {});
 
-  activeProcessing.delete(cardId);
-  processedContent.set(contentKey, Date.now());
-  if (processedContent.size > 10_000) {
-    const cutoff = Date.now() - 3_600_000;
-    for (const [k, t] of processedContent.entries()) {
-      if (t < cutoff) processedContent.delete(k);
-    }
-  }
+  // ─── Снимаем метку processing, ставим done ───
+  await fetch(
+    `https://api.trello.com/1/cards/${cardId}/labels?key=${process.env.TRELLO_KEY}&token=${process.env.TRELLO_TOKEN}&value=AI: done`,
+    { method: "POST" }
+  ).catch(() => {});
 
   console.log(`✅ Обработка карточки ${cardId} завершена`);
 }
