@@ -2,7 +2,6 @@
 import { Octokit } from "@octokit/rest";
 import raw from "raw-body";
 import { getAdapter } from "./ai-adapters/index.js";
-
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { readFile } from "fs/promises";
@@ -10,24 +9,30 @@ import { readFile } from "fs/promises";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+const promptCache = new Map();
+const activeProcessing = new Map();
+const DEBOUNCE_TTL = 30_000;
+
 const ORG = "ljudidela";
 const GITHUB_BASE = `https://github.com/${ORG}`;
 const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
-const promptCache = new Map();
 
-// ────────────── HELPERS ──────────────
+// ─────────────────────── HELPERS ───────────────────────
 async function loadPrompt(fileName) {
   if (promptCache.has(fileName)) return promptCache.get(fileName);
-  const content = await readFile(
-    join(__dirname, "ai-prompts", fileName),
-    "utf-8"
-  );
-  const trimmed = content.trim();
-  promptCache.set(fileName, trimmed);
-  return trimmed;
+  const filePath = join(__dirname, "ai-prompts", fileName);
+  try {
+    const content = await readFile(filePath, "utf-8");
+    const trimmed = content.trim();
+    promptCache.set(fileName, trimmed);
+    return trimmed;
+  } catch {
+    console.error(`Не найден промпт: ${filePath}`);
+    throw new Error(`Отсутствует файл промпта: ai-prompts/${fileName}`);
+  }
 }
 
-async function buildPrompt(cardDesc, repoContext, projectType) {
+async function buildPrompt(cardDesc, existingRepoContext, projectType) {
   const base = await loadPrompt("base-system-prompt.txt");
   let specific;
   try {
@@ -36,17 +41,15 @@ async function buildPrompt(cardDesc, repoContext, projectType) {
     console.log(`Шаблон ${projectType}.txt не найден → fallback на web-vite`);
     specific = await loadPrompt("web-vite.txt");
   }
-  return `${base}\n\n${specific}\n\n${repoContext}\n\nЗАДАЧА:\n${cardDesc}\n\nОтвечай ТОЛЬКО чистым JSON-массивом операций.`;
+  return `${base}\n\n${specific}\n\n${existingRepoContext}\n\nЗАДАЧА:\n${cardDesc}\n\nОтвечай ТОЛЬКО чистым JSON-массивом операций.`;
 }
 
 function getProjectType(payload, boardName) {
   if (process.env.PROJECT_TYPE)
     return process.env.PROJECT_TYPE.trim().toLowerCase();
-
   const labels = (payload.action?.data?.card?.labels || [])
     .map((l) => l.name?.toLowerCase().trim())
     .filter(Boolean);
-
   const labelMatch = labels.find(
     (l) => l.startsWith("project:") || l.startsWith("type:")
   );
@@ -62,19 +65,7 @@ function getProjectType(payload, boardName) {
   return "web-vite";
 }
 
-async function safeOctokit(fn, retries = 3, delay = 500) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await fn();
-    } catch (err) {
-      if (i === retries - 1) throw err;
-      console.warn(`Octokit retry #${i + 1}:`, err.message);
-      await new Promise((r) => setTimeout(r, delay * (i + 1)));
-    }
-  }
-}
-
-// ────────────── HANDLER ──────────────
+// ─────────────────────── HANDLER ───────────────────────
 export default async function handler(req, res) {
   if (req.method === "HEAD" || req.method === "GET")
     return res.status(200).send("Trello webhook alive");
@@ -87,18 +78,21 @@ export default async function handler(req, res) {
     return res.status(400).end("Invalid JSON");
   }
 
+  // Ответ сразу Trello, чтобы не дергался повторно
   res.status(200).json({ ok: true });
+
   processCard(payload).catch((err) => console.error("PROCESS ERROR:", err));
 }
 
-// ────────────── PROCESS CARD ──────────────
+// ─────────────────────── PROCESS CARD ───────────────────────
 async function processCard(payload) {
   const action = payload.action;
   if (!action) return;
 
-  if (!["createCard", "updateCard"].includes(action.type)) return;
+  const actionType = action.type;
+  if (!["createCard", "updateCard"].includes(actionType)) return;
   if (
-    action.type === "updateCard" &&
+    actionType === "updateCard" &&
     !Object.keys(action.data?.old || {}).includes("desc")
   )
     return;
@@ -109,19 +103,12 @@ async function processCard(payload) {
   const cardDesc = card.desc?.trim();
   if (!cardId || !cardName || !cardDesc) return;
 
-  // ─── Проверка метки AI:processing ───
-  const labels = (card.labels || []).map((l) => l.name);
-  if (labels.includes("AI: processing")) {
-    console.log(`Дубль: карточка ${cardId} уже в обработке (метка)`);
+  if (activeProcessing.has(cardId)) {
+    console.log(`Дубль: карточка ${cardId} уже в обработке`);
     return;
   }
 
-  // ─── Ставим метку processing ───
-  await fetch(
-    `https://api.trello.com/1/cards/${cardId}/labels?key=${process.env.TRELLO_KEY}&token=${process.env.TRELLO_TOKEN}&value=AI: processing`,
-    { method: "POST" }
-  ).catch(() => {});
-
+  activeProcessing.set(cardId, true);
   console.log(`СТАРТ обработки: "${cardName}" (${cardId})`);
 
   let boardName = action.data?.board?.name || payload.model?.name || "ai-board";
@@ -149,106 +136,92 @@ async function processCard(payload) {
     : "";
   const repoName = prefix + (sanitized || "project");
 
-  // ─── Контекст репозитория ───
   let repoInfo,
-    repoContext = "";
+    existingRepoContext = "";
   try {
-    repoInfo = await safeOctokit(() =>
-      octokit.repos.get({ owner: ORG, repo: repoName })
-    );
+    repoInfo = await octokit.repos.get({ owner: ORG, repo: repoName });
     const branch = repoInfo.data.default_branch || "main";
-    const { data: tree } = await safeOctokit(() =>
-      octokit.git.getTree({
-        owner: ORG,
-        repo: repoName,
-        tree_sha: branch,
-        recursive: true,
-      })
-    );
+    const { data: tree } = await octokit.git.getTree({
+      owner: ORG,
+      repo: repoName,
+      tree_sha: branch,
+      recursive: true,
+    });
     const filesList = tree.tree
       .filter((f) => f.type === "blob")
       .map((f) => f.path)
       .slice(0, 100)
       .join("\n");
-    repoContext = `=== СУЩЕСТВУЮЩИЙ ПРОЕКТ ===\nСтруктура:\n${filesList}\n\nВАЖНО: используй "update" для существующих файлов!\n`;
+    existingRepoContext = `=== СУЩЕСТВУЮЩИЙ ПРОЕКТ ===\nСтруктура:\n${filesList}\n\nВАЖНО: используй "update" для существующих файлов!\n`;
     console.log(`Контекст репозитория получен: ${repoName}`);
   } catch (e) {
     if (e.status !== 404) throw e;
     console.log(`Репозиторий не найден, создаём новый: ${repoName}`);
-    repoInfo = await safeOctokit(() =>
-      octokit.repos.createInOrg({
-        org: ORG,
-        name: repoName,
-        private: false,
-        auto_init: true,
-      })
-    );
-    repoContext = `=== НОВЫЙ ПРОЕКТ (${projectType.toUpperCase()}) ===\nСоздай всё с нуля по лучшим практикам.\n`;
+    repoInfo = await octokit.repos.createInOrg({
+      org: ORG,
+      name: repoName,
+      private: false,
+      auto_init: true,
+    });
+    existingRepoContext = `=== НОВЫЙ ПРОЕКТ (${projectType.toUpperCase()}) ===\nСоздай всё с нуля по лучшим практикам.\n`;
   }
 
   const targetBranch = repoInfo.data.default_branch || "main";
+  const prompt = await buildPrompt(cardDesc, existingRepoContext, projectType);
 
-  // ─── Промпт и AI ───
-  const prompt = await buildPrompt(cardDesc, repoContext, projectType);
   console.log("Отправка запроса в AI/Gemini...");
   const aiAdapter = getAdapter(process.env.AI_PROVIDER || "neuro");
   const fileOps = await aiAdapter.generateCode(prompt);
-  if (!Array.isArray(fileOps) || fileOps.length === 0)
+  if (!Array.isArray(fileOps) || !fileOps.length)
     throw new Error("AI вернул пустой массив операций");
   console.log(`AI вернул ${fileOps.length} операций`);
 
-  // ─── Применяем операции ───
   const results = { success: [], failed: [] };
   for (const op of fileOps) {
     if (!op?.path || !["create", "update", "delete"].includes(op.action))
       continue;
     const path = op.path.replace(/^\/+/, "");
     let content = op.content ?? "";
-    if (typeof content === "string")
+    if (typeof content === "string") {
       content = content
         .replace(/\\n/g, "\n")
         .replace(/\\t/g, "\t")
         .replace(/\\"/g, '"')
         .replace(/\\\\/g, "\\");
+    }
 
     try {
       let sha;
       try {
-        const { data } = await safeOctokit(() =>
-          octokit.repos.getContent({
-            owner: ORG,
-            repo: repoName,
-            path,
-            ref: targetBranch,
-          })
-        );
+        const { data } = await octokit.repos.getContent({
+          owner: ORG,
+          repo: repoName,
+          path,
+          ref: targetBranch,
+        });
         sha = data.sha;
       } catch {}
 
       if (op.action === "delete") {
         if (sha)
-          await safeOctokit(() =>
-            octokit.repos.deleteFile({
-              owner: ORG,
-              repo: repoName,
-              path,
-              message: `AI: delete ${path} — ${cardName}`,
-              sha,
-              branch: targetBranch,
-            })
-          );
-      } else {
-        await safeOctokit(() =>
-          octokit.repos.createOrUpdateFileContents({
+          await octokit.repos.deleteFile({
             owner: ORG,
             repo: repoName,
             path,
-            message: `AI: ${op.action} ${path} — ${cardName}`,
-            content: Buffer.from(content).toString("base64"),
+            message: `AI: delete ${path} — ${cardName}`,
             sha,
             branch: targetBranch,
-          })
-        );
+          });
+      } else {
+        await octokit.repos.createOrUpdateFileContents({
+          owner: ORG,
+          repo: repoName,
+          path,
+          message: `AI: ${op.action} ${path} — ${cardName}`,
+          content: Buffer.from(content).toString("base64"),
+          sha,
+          branch: targetBranch,
+        });
       }
       results.success.push({ path, action: op.action });
       console.log(`✅ ${op.action.toUpperCase()} ${path}`);
@@ -261,6 +234,7 @@ async function processCard(payload) {
   const repoUrl = `${GITHUB_BASE}/${repoName}`;
   const commentText = `Репозиторий обновлён (${projectType})\n${repoUrl}\n\nУспешно: ${results.success.length} файлов\nОшибок: ${results.failed.length}`;
 
+  // ───── Добавляем комментарий и метку дедупа ─────
   await fetch(
     `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${
       process.env.TRELLO_KEY
@@ -270,12 +244,17 @@ async function processCard(payload) {
     { method: "POST" }
   ).catch(() => {});
 
-  // ─── Снимаем метку processing, ставим done ───
+  // ставим метку "processed" для дедупа
   await fetch(
-    `https://api.trello.com/1/cards/${cardId}/labels?key=${process.env.TRELLO_KEY}&token=${process.env.TRELLO_TOKEN}&value=AI: done`,
+    `https://api.trello.com/1/cards/${cardId}/labels?key=${
+      process.env.TRELLO_KEY
+    }&token=${process.env.TRELLO_TOKEN}&idLabels=${encodeURIComponent(
+      "processed"
+    )}`,
     { method: "POST" }
   ).catch(() => {});
 
+  activeProcessing.delete(cardId);
   console.log(`✅ Обработка карточки ${cardId} завершена`);
 }
 
