@@ -2,7 +2,6 @@
 import { Octokit } from "@octokit/rest";
 import raw from "raw-body";
 import { getAdapter } from "./ai-adapters/index.js";
-
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { readFile } from "fs/promises";
@@ -10,6 +9,7 @@ import { readFile } from "fs/promises";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+// ────────────── КЭШИ И ДЕДУП ──────────────
 const promptCache = new Map();
 const activeProcessing = new Map(); // карточки в обработке
 const processedContent = new Map(); // дедуп по контенту
@@ -126,41 +126,28 @@ async function processCard(payload) {
 
   const contentKey = `${cardId}_${cardDesc}`;
 
-  // ────────────── Дедуп по карте и метке ──────────────
-  if (activeProcessing.has(cardId)) {
-    console.log(`Дубль: карточка ${cardId} уже в обработке`);
+  // ────────────── НАДЁЖНЫЙ ДЕДУП ──────────────
+  if (activeProcessing.has(cardId) || processedContent.has(contentKey)) {
+    console.log(`Дубль/уже обработано: ${cardId}`);
     return;
   }
-  activeProcessing.set(cardId, true);
 
-  // Если недавно обработано — пропускаем
-  if (
-    processedContent.has(contentKey) &&
-    Date.now() - processedContent.get(contentKey) < DEBOUNCE_TTL
-  ) {
-    console.log(`Дедуп: карточка ${cardId} обработана недавно`);
-    activeProcessing.delete(cardId);
-    return;
-  }
+  // Ставим сразу, чтобы параллельный вызов не стартовал
+  activeProcessing.set(cardId, true);
+  processedContent.set(contentKey, Date.now());
 
   console.log(`СТАРТ обработки: "${cardName}" (${cardId})`);
 
   try {
-    // ────────────── Имя доски и тип проекта ──────────────
+    // ────────────── Имя доски и проект ──────────────
     let boardName =
       action.data?.board?.name || payload.model?.name || "ai-board";
-    if (!boardName) {
-      const r = await fetch(
-        `https://api.trello.com/1/cards/${cardId}/board?key=${process.env.TRELLO_KEY}&token=${process.env.TRELLO_TOKEN}`
-      );
-      if (r.ok) boardName = (await r.json()).name;
-    }
     boardName = (boardName || "ai-board").trim();
 
     const projectType = getProjectType(payload, boardName);
     console.log(`Тип проекта → ${projectType}`);
 
-    // ────────────── Имя репозитория ──────────────
+    // ────────────── Формируем имя репо ──────────────
     const sanitized = boardName
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
@@ -279,11 +266,10 @@ async function processCard(payload) {
       }
     }
 
-    // ────────────── Комментируем Trello и ставим метку дедупа ──────────────
+    // ────────────── Комментируем Trello и ставим метку ──────────────
     const repoUrl = `${GITHUB_BASE}/${repoName}`;
     const commentText = `Репозиторий обновлён (${projectType})\n${repoUrl}\n\nУспешно: ${results.success.length} файлов\nОшибок: ${results.failed.length}`;
 
-    // Пишем комментарий в Trello
     await fetch(
       `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${
         process.env.TRELLO_KEY
@@ -293,16 +279,14 @@ async function processCard(payload) {
       { method: "POST" }
     ).catch(() => {});
 
-    // Ставим метку "processed" для надёжного дедупа
     await fetch(
       `https://api.trello.com/1/cards/${cardId}/labels?key=${process.env.TRELLO_KEY}&token=${process.env.TRELLO_TOKEN}&name=processed&color=green`,
       { method: "POST" }
     ).catch(() => {});
 
-    processedContent.set(contentKey, Date.now());
-    console.log(`✅ Обработка карточки ${cardId} завершена`);
+    console.log(`✅ Карточка ${cardId} обработана`);
   } catch (err) {
-    console.error("КРИТИЧЕСКАЯ ОШИБКА:", err);
+    console.error("КРИТИЧЕСКАЯ ОШИБКА:", err.message);
     await fetch(
       `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${
         process.env.TRELLO_KEY
@@ -314,7 +298,7 @@ async function processCard(payload) {
   } finally {
     activeProcessing.delete(cardId);
 
-    // Чистим Map от старых дедупов
+    // Чистка старых дедупов
     if (processedContent.size > 10_000) {
       const cutoff = Date.now() - 3_600_000;
       for (const [k, t] of processedContent.entries()) {
