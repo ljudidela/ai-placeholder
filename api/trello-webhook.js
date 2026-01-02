@@ -1,177 +1,105 @@
-// api/handler.js
 import { Octokit } from "@octokit/rest";
 import raw from "raw-body";
 import { getAdapter } from "./ai-adapters/index.js";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
-import { readFile } from "fs/promises";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-// ────────────── КЭШИ И ДЕДУП ──────────────
-const promptCache = new Map();
-const activeProcessing = new Map(); // карточки в обработке
-const processedContent = new Map(); // дедуп по контенту
-const DEBOUNCE_TTL = 30_000;
-
-// ────────────── HELPERS ──────────────
-async function loadPrompt(fileName) {
-  if (promptCache.has(fileName)) return promptCache.get(fileName);
-
-  const filePath = join(__dirname, "ai-prompts", fileName);
-  try {
-    const content = await readFile(filePath, "utf-8");
-    const trimmed = content.trim();
-    promptCache.set(fileName, trimmed);
-    return trimmed;
-  } catch (err) {
-    console.error(`Не найден промпт: ${filePath}`);
-    throw new Error(`Отсутствует файл промпта: ai-prompts/${fileName}`);
-  }
-}
-
-async function buildPrompt(cardDesc, existingRepoContext, projectType) {
-  const base = await loadPrompt("base-system-prompt.txt");
-
-  let specific;
-  try {
-    specific = await loadPrompt(`${projectType}.txt`);
-  } catch {
-    console.log(`Шаблон ${projectType}.txt не найден → fallback на web-vite`);
-    specific = await loadPrompt("web-vite.txt");
-  }
-
-  return `${base}
-
-${specific}
-
-${existingRepoContext}
-
-ЗАДАЧА:
-${cardDesc}
-
-Отвечай ТОЛЬКО чистым JSON-массивом операций.`;
-}
-
-function getProjectType(payload, boardName) {
-  if (process.env.PROJECT_TYPE) {
-    return process.env.PROJECT_TYPE.trim().toLowerCase();
-  }
-
-  const labels = (payload.action?.data?.card?.labels || [])
-    .map((l) => l.name?.toLowerCase().trim())
-    .filter(Boolean);
-
-  const labelMatch = labels.find(
-    (l) => l.startsWith("project:") || l.startsWith("type:")
-  );
-  if (labelMatch) return labelMatch.split(":").pop().trim();
-
-  const lower = boardName.toLowerCase();
-  if (
-    lower.includes("game") ||
-    lower.includes("heaps") ||
-    lower.includes("haxe")
-  ) {
-    return "haxe-heaps";
-  }
-
-  return "web-vite";
-}
-
-// ────────────── OCTOKIT ──────────────
-const ORG = "ljudidela";
 const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+const ORG = "ljudidela";
 const GITHUB_BASE = `https://github.com/${ORG}`;
 
-// ────────────── HANDLER ──────────────
+// ─────────────────────── НОВАЯ ЗАЩИТА ОТ ДУБЛЕЙ ───────────────────────
+// Две карты: активная обработка + дедупликация по точному тексту описания
+const activeProcessing = new Map(); // cardId → true
+const processedContent = new Map(); // `${cardId}_${hash(desc)}` → timestamp
+const DEBOUNCE_TTL = 30_000; // 30 секунд — больше чем надо
+
 export default async function handler(req, res) {
-  if (req.method === "HEAD" || req.method === "GET")
+  if (req.method === "HEAD" || req.method === "GET") {
     return res.status(200).send("Trello webhook alive");
+  }
   if (req.method !== "POST") return res.status(405).end();
 
   let payload;
   try {
-    payload = JSON.parse((await raw(req)).toString("utf-8"));
-  } catch {
+    const body = await raw(req);
+    payload = JSON.parse(body.toString("utf-8"));
+  } catch (e) {
     return res.status(400).end("Invalid JSON");
   }
 
-  // Ответ Trello сразу
-  res.status(200).json({ ok: true });
-
-  // Обработка карточки в фоне
-  processCard(payload).catch((err) => console.error("PROCESS ERROR:", err));
-}
-
-// ────────────── PROCESS CARD ──────────────
-async function processCard(payload) {
-  const action = payload.action;
-  if (!action) return;
-
-  const actionType = action.type;
-  if (!["createCard", "updateCard"].includes(actionType)) return;
-  if (
-    actionType === "updateCard" &&
-    !Object.keys(action.data?.old || {}).includes("desc")
-  )
-    return;
-
-  const card = action.data.card;
-  const cardId = card.id;
-  const cardName = card.name?.trim();
-  const cardDesc = (card.desc || "").trim();
-  if (!cardId || !cardName || !cardDesc) return;
-
-  const contentKey = `${cardId}_${cardDesc}`;
-
-  // ────────────── НАДЁЖНЫЙ ДЕДУП ──────────────
-  if (activeProcessing.has(cardId) || processedContent.has(contentKey)) {
-    console.log(`Дубль/уже обработано: ${cardId}`);
-    return;
+  const actionType = payload.action?.type;
+  if (!["createCard", "updateCard"].includes(actionType)) {
+    return res.status(200).end();
   }
 
-  // Ставим сразу, чтобы параллельный вызов не стартовал
-  activeProcessing.set(cardId, true);
-  processedContent.set(contentKey, Date.now());
+  if (actionType === "updateCard") {
+    const changed = Object.keys(payload.action?.data?.old || {});
+    if (!changed.includes("desc")) return res.status(200).end();
+  }
 
-  console.log(`СТАРТ обработки: "${cardName}" (${cardId})`);
+  const cardId = payload.action.data.card.id;
+  const cardName = payload.action.data.card.name?.trim();
+  const cardDesc = (payload.action.data.card.desc || "").trim();
+
+  if (!cardId || !cardName || !cardDesc) {
+    return res.status(200).end();
+  }
+
+  // ─────────────────────── ЗАЩИТА ОТ ДУБЛЕЙ ───────────────────────
+  // 1. Уже идёт обработка этой карточки
+  if (activeProcessing.has(cardId)) {
+    console.log(`ДУБЛЬ: карточка ${cardId} уже обрабатывается`);
+    return res.status(200).json({ status: "already_processing" });
+  }
+
+  // 2. Этот же самый текст уже был обработан недавно
+  const contentKey = `${cardId}_${cardDesc}`;
+  if (processedContent.has(contentKey)) {
+    const ago = Date.now() - processedContent.get(contentKey);
+    if (ago < DEBOUNCE_TTL) {
+      console.log(
+        `ДЕДУП: тот же текст обработан ${Math.round(ago / 1000)}с назад`
+      );
+      return res.status(200).json({ status: "deduped_same_content" });
+    }
+  }
+
+  // Ставим флаг начала обработки
+  activeProcessing.set(cardId, true);
+  console.log(`СТАРТ обработки карточки ${cardId} («${cardName}»)`);
+
+  let repoInfo;
+  let existingRepoContext = "";
+  let finalRepoName;
 
   try {
-    // ────────────── Имя доски и проект ──────────────
+    // === Получаем имя репо из доски ===
     let boardName =
-      action.data?.board?.name || payload.model?.name || "ai-board";
-    boardName = (boardName || "ai-board").trim();
+      payload.action?.data?.board?.name || payload.model?.name || "ai-board";
+    if (!boardName) {
+      try {
+        const boardRes = await fetch(
+          `https://api.trello.com/1/cards/${cardId}/board?key=${process.env.TRELLO_KEY}&token=${process.env.TRELLO_TOKEN}`
+        );
+        if (boardRes.ok) boardName = (await boardRes.json()).name;
+      } catch (_) {}
+    }
+    boardName = boardName.trim() || "ai-board";
 
-    const projectType = getProjectType(payload, boardName);
-    console.log(`Тип проекта → ${projectType}`);
+    finalRepoName =
+      boardName
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/(^-+|-+$)/g, "")
+        .replace(/-+/g, "-") || "ai-project";
 
-    // ────────────── Формируем имя репо ──────────────
-    const sanitized = boardName
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/(^-+|-+$)/g, "")
-      .replace(/-+/g, "-");
-
-    const prefix = projectType.includes("haxe")
-      ? "haxe-"
-      : projectType.includes("godot")
-      ? "godot-"
-      : projectType.includes("backend")
-      ? "api-"
-      : "";
-    const repoName = prefix + (sanitized || "project");
-
-    // ────────────── Получение контекста репо ──────────────
-    let repoInfo,
-      repoContext = "";
+    // === Читаем репо или создаём новое ===
     try {
-      repoInfo = await octokit.repos.get({ owner: ORG, repo: repoName });
+      repoInfo = await octokit.repos.get({ owner: ORG, repo: finalRepoName });
       const branch = repoInfo.data.default_branch || "main";
+
       const { data: tree } = await octokit.git.getTree({
         owner: ORG,
-        repo: repoName,
+        repo: finalRepoName,
         tree_sha: branch,
         recursive: true,
       });
@@ -179,133 +107,185 @@ async function processCard(payload) {
       const filesList = tree.tree
         .filter((f) => f.type === "blob")
         .map((f) => f.path)
-        .slice(0, 100)
-        .join("\n");
+        .slice(0, 100);
 
-      repoContext = `=== СУЩЕСТВУЮЩИЙ ПРОЕКТ ===\nСтруктура:\n${filesList}\n\nВАЖНО: используй "update" для существующих файлов!\n`;
-      console.log(`Контекст репозитория получен: ${repoName}`);
+      const important = [
+        "README.md",
+        "package.json",
+        "tsconfig.json",
+        "vite.config.ts",
+        "vite.config.js",
+        "src/app/page.tsx",
+        "src/app/layout.tsx",
+      ];
+
+      const existingFiles = {};
+      for (const path of important) {
+        if (!filesList.includes(path)) continue;
+        try {
+          const { data } = await octokit.repos.getContent({
+            owner: ORG,
+            repo: finalRepoName,
+            path,
+            ref: branch,
+          });
+          existingFiles[path] = Buffer.from(data.content, "base64").toString(
+            "utf-8"
+          );
+        } catch (_) {}
+      }
+
+      existingRepoContext = `\n\n=== СУЩЕСТВУЮЩИЙ ПРОЕКТ ===\n\n`;
+      for (const [p, c] of Object.entries(existingFiles)) {
+        existingRepoContext += `--- ${p} ---\n${c}\n\n`;
+      }
+      existingRepoContext += `Структура (до 100 файлов):\n${filesList.join(
+        "\n"
+      )}\n`;
+      existingRepoContext += `\nВАЖНО: используй "update" для существующих файлов, не создавай дубли.\n`;
     } catch (e) {
       if (e.status !== 404) throw e;
-      console.log(`Репозиторий не найден, создаём новый: ${repoName}`);
-      repoContext = `=== НОВЫЙ ПРОЕКТ (${projectType.toUpperCase()}) ===\nСоздай всё с нуля по лучшим практикам.\n`;
+      existingRepoContext = `\n\n=== НОВЫЙ ПРОЕКТ ===\nСоздай всё с нуля по лучшим практикам.\n`;
+    }
+
+    if (!repoInfo) {
       await octokit.repos.createInOrg({
         org: ORG,
-        name: repoName,
+        name: finalRepoName,
         private: false,
         auto_init: true,
       });
-      repoInfo = await octokit.repos.get({ owner: ORG, repo: repoName });
+      repoInfo = await octokit.repos.get({ owner: ORG, repo: finalRepoName });
     }
 
     const targetBranch = repoInfo.data.default_branch || "main";
 
-    // ────────────── Формируем промпт и вызываем AI ──────────────
-    const prompt = await buildPrompt(cardDesc, repoContext, projectType);
-    console.log("Отправка запроса в AI/Gemini...");
-    const aiAdapter = getAdapter(process.env.AI_PROVIDER || "neuro");
+    const prompt = `ТЫ — senior full-stack инженер. Отвечай ТОЛЬКО чистым JSON-массивом.
+
+ЖЁСТКИЕ ПРАВИЛА:
+1. index.html — всегда в корне
+2. package.json — всегда есть и рабочий
+3. README.md — с точной командой запуска
+4. Никаких /public, дубликатов, заглушек
+5. Проект запускается через "npm install && npm run dev" без ошибок
+
+${existingRepoContext}
+
+ЗАДАЧА:
+${cardDesc}
+
+Отвечай ТОЛЬКО JSON-массивом операций.`;
+
+    const aiAdapter = getAdapter(process.env.AI_PROVIDER || "qwen");
     const fileOps = await aiAdapter.generateCode(prompt);
-    if (!Array.isArray(fileOps) || fileOps.length === 0)
-      throw new Error("AI вернул пустой массив операций");
 
-    // ────────────── Применяем операции к репо ──────────────
+    if (!Array.isArray(fileOps) || fileOps.length === 0) {
+      throw new Error("AI вернул пустой ответ");
+    }
+
     const results = { success: [], failed: [] };
-    for (const op of fileOps) {
-      if (!op?.path || !["create", "update", "delete"].includes(op.action))
-        continue;
 
+    for (const op of fileOps) {
+      if (!op?.path || !op.action) continue;
+      const action = op.action.toLowerCase();
       const path = op.path.replace(/^\/+/, "");
-      let content = op.content ?? "";
-      if (typeof content === "string") {
-        content = content
-          .replace(/\\n/g, "\n")
-          .replace(/\\t/g, "\t")
-          .replace(/\\"/g, '"')
-          .replace(/\\\\/g, "\\");
-      }
+
+      if (!["create", "update", "delete"].includes(action)) continue;
 
       try {
         let sha;
         try {
           const { data } = await octokit.repos.getContent({
             owner: ORG,
-            repo: repoName,
+            repo: finalRepoName,
             path,
             ref: targetBranch,
           });
           sha = data.sha;
-        } catch (_) {}
+        } catch (e) {
+          if (e.status !== 404) console.error("SHA error:", e.message);
+        }
 
-        if (op.action === "delete") {
-          if (sha) {
-            await octokit.repos.deleteFile({
-              owner: ORG,
-              repo: repoName,
-              path,
-              message: `AI: delete ${path} — ${cardName}`,
-              sha,
-              branch: targetBranch,
-            });
-          }
+        if (action === "delete") {
+          if (!sha) continue;
+          await octokit.repos.deleteFile({
+            owner: ORG,
+            repo: finalRepoName,
+            path,
+            message: `AI: delete ${path} — ${cardName}`,
+            sha,
+            branch: targetBranch,
+          });
         } else {
+          let content = op.content ?? "";
+          if (typeof content === "string") {
+            content = content
+              .replace(/\\n/g, "\n")
+              .replace(/\\t/g, "\t")
+              .replace(/\\"/g, '"')
+              .replace(/\\\\/g, "\\");
+          }
+
           await octokit.repos.createOrUpdateFileContents({
             owner: ORG,
-            repo: repoName,
+            repo: finalRepoName,
             path,
-            message: `AI: ${op.action} ${path} — ${cardName}`,
+            message: `AI: ${action} ${path} — ${cardName}`,
             content: Buffer.from(content).toString("base64"),
             branch: targetBranch,
             sha,
           });
         }
-
-        results.success.push({ path, action: op.action });
-        console.log(`✅ ${op.action.toUpperCase()} ${path}`);
+        results.success.push({ path, action });
       } catch (err) {
         results.failed.push({ path, error: err.message });
-        console.error(`❌ Ошибка ${op.action} ${path}:`, err.message);
+        console.error(`Ошибка ${action} ${path}:`, err.message);
       }
     }
 
-    // ────────────── Комментируем Trello и ставим метку ──────────────
-    const repoUrl = `${GITHUB_BASE}/${repoName}`;
-    const commentText = `Репозиторий обновлён (${projectType})\n${repoUrl}\n\nУспешно: ${results.success.length} файлов\nОшибок: ${results.failed.length}`;
+    const repoUrl = `${GITHUB_BASE}/${finalRepoName}`;
+    const comment = `Репозиторий обновлён\n${repoUrl}\n\nУспешно: ${results.success.length}\nОшибок: ${results.failed.length}`;
 
     await fetch(
       `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${
         process.env.TRELLO_KEY
-      }&token=${process.env.TRELLO_TOKEN}&text=${encodeURIComponent(
-        commentText
-      )}`,
+      }&token=${process.env.TRELLO_TOKEN}&text=${encodeURIComponent(comment)}`,
       { method: "POST" }
     ).catch(() => {});
 
-    await fetch(
-      `https://api.trello.com/1/cards/${cardId}/labels?key=${process.env.TRELLO_KEY}&token=${process.env.TRELLO_TOKEN}&name=processed&color=green`,
-      { method: "POST" }
-    ).catch(() => {});
-
-    console.log(`✅ Карточка ${cardId} обработана`);
+    return res.status(200).json({
+      success: true,
+      repo: repoUrl,
+      files: results.success.length,
+    });
   } catch (err) {
-    console.error("КРИТИЧЕСКАЯ ОШИБКА:", err.message);
+    console.error("КРИТИЧЕСКАЯ ОШИБКА:", err);
+
     await fetch(
       `https://api.trello.com/1/cards/${cardId}/actions/comments?key=${
         process.env.TRELLO_KEY
       }&token=${process.env.TRELLO_TOKEN}&text=${encodeURIComponent(
-        "AI Ошибка: " + err.message.slice(0, 400)
+        "Ошибка AI: " + err.message.slice(0, 400)
       )}`,
       { method: "POST" }
     ).catch(() => {});
-  } finally {
-    activeProcessing.delete(cardId);
 
-    // Чистка старых дедупов
+    return res.status(500).json({ error: err.message });
+  } finally {
+    // ─────────────────────── СНЯТИЕ БЛОКИРОВОК ───────────────────────
+    activeProcessing.delete(cardId);
+    processedContent.set(`${cardId}_${cardDesc}`, Date.now());
+
+    // Чистим старые записи (чтобы мапа не росла вечно)
     if (processedContent.size > 10_000) {
-      const cutoff = Date.now() - 3_600_000;
-      for (const [k, t] of processedContent.entries()) {
-        if (t < cutoff) processedContent.delete(k);
+      const cutoff = Date.now() - 3_600_000; // старше часа
+      for (const [key, ts] of processedContent.entries()) {
+        if (ts < cutoff) processedContent.delete(key);
       }
     }
   }
 }
 
-export const config = { api: { bodyParser: false } };
+export const config = {
+  api: { bodyParser: false },
+};
